@@ -1,0 +1,62 @@
+---
+title: "Explore the eProgesa deferral dataframe"
+output: md_document
+---
+
+
+
+```{r setup}
+library(tidyverse)
+```
+
+```{r}
+deferral_filename <- "~/proj/interval_prediction/data/FRC.DW_DEFERRAL.DAT"
+input_col_types <- list(
+  X1 = col_character(),
+  X2 = col_factor(),
+  X3 = col_date("%Y%m%d"),
+  X4 = col_date("%Y%m%d")
+)
+deferral <- read_delim(deferral_filename, delim="|", col_names = F, col_types = input_col_types)
+
+names(deferral) <- c("KEY_DONOR",
+                     "KEY_DEFERRAL_CODE",
+                     "KEY_DEFERRAL_DATE_START",
+                     "KEY_DEFERRAL_DATE_STOP")
+```
+
+```{r}
+#deferral
+```
+
+```{r}
+n <- n_distinct(deferral %>% pull(KEY_DONOR))
+cat(sprintf("%i donors have had deferrals\n", n))
+summary(deferral)
+```
+What are the counts of different deferral codes? No serious local stuff or faintings. Nothing which starts with H0
+```{r}
+t <- table(deferral$KEY_DEFERRAL_CODE)
+t[sort(names(t))]
+```
+One really old deferral start date!
+```{r}
+deferral %>% arrange(KEY_DEFERRAL_DATE_START) %>% select(KEY_DEFERRAL_DATE_START, KEY_DEFERRAL_DATE_STOP)
+```
+
+```{r}
+n <- deferral %>% filter(KEY_DEFERRAL_DATE_START > KEY_DEFERRAL_DATE_STOP) %>% nrow()
+cat(sprintf("In %i cases the deferral stops before it has started\n", n))
+```
+Often deferrals are ridiculously long! Even 1000 year deferrals can happen.
+
+```{r}
+deferral_len_in_days <-
+  deferral %>% 
+  mutate(diff = as.integer(KEY_DEFERRAL_DATE_STOP - KEY_DEFERRAL_DATE_START)) %>%
+  #filter(diff >= 0) %>%
+  pull(diff)
+table(cut(deferral_len_in_days, breaks=10, dig.lab=6))
+```
+
+

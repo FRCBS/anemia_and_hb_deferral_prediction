@@ -1,0 +1,47 @@
+---
+title: "Analyze anemia metaresults"
+author: "Jarkko Toivonen"
+date: "10/20/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+
+## R Markdown
+
+```{r}
+meta <- read_tsv("~/data/public/finngen/meta/D3_ANAEMIA_IRONDEF_meta_out.tsv.gz")
+```
+```{r}
+c6 <- meta %>% rename(CHR=`#CHR`) %>% filter(CHR==6)
+# Interesting variables
+vars <- c("CHR", "POS", "REF", "ALT", "FINNGEN_af_alt", "all_inv_var_meta_beta", "all_inv_var_meta_p")
+```
+
+```{r}
+nrow(c6)
+summary(c6)
+```
+
+```{r}
+sig <- c6 %>% filter(all_inv_var_meta_p < 5*10**-8, !is.na(FINNGEN_af_alt))
+summary(sig)
+```
+
+```{r, By effect size}
+sig %>% arrange(all_inv_var_meta_beta) %>% select(all_of(vars)) %>% head()
+sig %>% arrange(all_inv_var_meta_beta) %>% select(all_of(vars)) %>% tail()
+```
+
+```{r, By minor allele frequency}
+sig %>% arrange(FINNGEN_af_alt) %>% select(all_of(vars)) %>% head()
+sig %>% arrange(FINNGEN_af_alt) %>% select(all_of(vars)) %>% tail()
+```
+
+
+```{r, By p-value}
+sig %>% arrange(all_inv_var_meta_p) %>% select(all_of(vars))
+```

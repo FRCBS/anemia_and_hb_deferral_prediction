@@ -1,0 +1,419 @@
+---
+title: "PCA components of the genetic relationship matrix"
+author: "Jarkko Toivonen"
+date: "2021-04-07"
+output:
+  md_document: default
+  html_document: default
+  pdf_document: default
+params:
+  input_file: NULL
+  recompute_results: FALSE
+  result_dir: "/home/toivoja/FRCBS/blood_health_phewas/phewas-30k/results"
+#  prefix: "/home/toivoja/FRCBS/blood_health_phewas/results/pca-cleaned/pca-FG-1KG-intersection"
+#  prefix: "/home/toivoja/FRCBS/blood_health_phewas/phewas-30k/results/pca-cleaned/pca-FG-1KG-intersection"
+  dir_1kg: "~/data/public/1000genomes"
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(GADMTools)
+#library(gridExtra)
+#library(ggpubr)
+#library(tidyverse)
+library(viridis)
+library(knitr)
+library(RColorBrewer)
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(parallel))
+suppressPackageStartupMessages(library(gridExtra))
+suppressPackageStartupMessages(library(ggpubr))
+
+# Files from 1000 genomes are here
+
+#prefix=params$prefix
+dir_1kg=params$dir_1kg
+# This contains the PCA result
+result_dir <- params$result_dir
+fig_dir <- paste(result_dir, "images", sep="/")
+pca_cleaned_dir <- paste(result_dir, "pca-cleaned", sep="/")
+eigenvector_filename <- paste(pca_cleaned_dir, "pca-FG-1KG-intersection.eigenvec", sep="/")
+eigenvalue_filename  <- paste(pca_cleaned_dir, "pca-FG-1KG-intersection.eigenval", sep="/")
+ultimate_eigenvector_filename <- paste(pca_cleaned_dir, "ultimate-pca.eigenvec", sep="/")
+ultimate_eigenvalue_filename  <- paste(pca_cleaned_dir, "ultimate-pca.eigenval", sep="/")
+outliers_filename             <- paste(fig_dir, "pca_outliers.png", sep="/")
+barplot_filename              <- paste(fig_dir, "pca_barplot.png", sep="/")
+aberrant_outliers_filename    <- paste(fig_dir, "aberrant_pca_outliers.png", sep="/")
+aberrant_results_filename     <- paste(pca_cleaned_dir, "aberrant_results.rdata", sep="/")
+save_figs <- FALSE
+```
+
+
+
+
+Read PCA data
+
+```{r}
+pca <- read_delim(eigenvector_filename, delim=" ", col_names = TRUE)
+```
+
+
+
+
+## Plot the principal component pairs of FinnGen blood donors and people from 1000 genomes
+
+
+Create population labels from the 1000 genomes data and the FinnGen blood donor data.
+
+```{r}
+# Get population labels from 1000 Genomes data
+population_filename <- paste(dir_1kg, "integrated_call_samples_v3.20130502.ALL.panel", sep="/")
+# The input file has stupidly two tab characters at the end of the header
+population <- read_delim(population_filename, delim="\t", col_names = c("sample", "pop", "super_pop", "gender"))
+
+
+# Create population name for each individual.
+# Use super population except for Finns use the population (FIN).
+population <- population %>% 
+  mutate(super_pop=ifelse(pop=="FIN", "FIN", super_pop)) %>%
+  select("IID"="sample", "population"="super_pop")
+
+# Create population labels for individuals (samples) in the combined FinnGen and 1KG data sets
+ids <- tibble(IID=pca$IID)
+population <- left_join(ids, population, by="IID") %>%
+  replace_na(list(population="FinnGen")) # Those not in 1kg are in FinnGen
+```
+
+
+```{r create pca_and_population table}
+
+
+# Join the IID/population dataframe and the PCA dataframes
+pca_and_population <- pca %>% inner_join(population, by="IID")
+
+
+population_names <- unique(c("FIN", "FinnGen", pca_and_population$population))
+#temp <- tibble(population=population_names)
+#pca <- inner_join(temp, pca, by="population")  # Just to reorder
+pca_and_population <- pca_and_population %>% mutate(population = factor(pca_and_population$population, levels=population_names))
+#pca <- pca %>% select(everything(), "population")
+
+# This order defines the plotting order
+pca_and_population <- arrange(pca_and_population, desc(population))
+#print(head(pca))
+#summary(pca)
+```
+
+```{r plot the principal component pairs}
+# plot of the principal components pairs
+
+# Pairs of the first five principal components to be plotted
+column.combinations <- combn(1:5, 2)  # Creates a 2x10 matrix of numbers 1,...,5
+
+# Helper to create 'n' evenly spaced color hues as hex codes
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+# Assign color to each population
+n = length(unique(pca_and_population$population))  # Number of populations
+colors <- c("#0000FF", "#000000", gg_color_hue(n-2))   # Blue for 1KG FIN and black for FinnGen
+names(colors) <- population_names
+#print(colors)
+
+# Plot the ith pair of principal components
+plot.function <- function(i){
+  xi <- column.combinations[1,i]
+  yi <- column.combinations[2,i]
+  xcolname <- sprintf("PC%i", xi)
+  ycolname <- sprintf("PC%i", yi)
+  x.label <- paste("Principal Component ", xi)
+  y.label <- paste("Principal Component ", yi)
+
+  plot <- pca_and_population %>% 
+    ggplot(aes_string(x=xcolname, y=ycolname)) + 
+    geom_point(aes(colour = population), size = 2) + #, alpha=0.5) + 
+    labs(x = x.label, y = y.label, colour= "Sample") + 
+    theme_minimal() + 
+    theme(axis.text.y = element_text(angle = 90, size = 6), 
+          axis.text.x = element_text(size = 6), 
+          axis.title=element_text(size=13)) + 
+    scale_color_manual(values=colors)
+  
+  return(plot)
+}
+
+plot_list <- lapply(1:ncol(column.combinations), FUN= plot.function)
+pc_plot <- ggpubr::ggarrange(plotlist=plot_list, common.legend=T, ncol=2, nrow=5, legend="bottom", labels = paste(LETTERS[1:length(plot_list)], ")", sep=""))
+
+running_under_knitr <- isTRUE(getOption('knitr.in.progress'))
+if (save_figs || running_under_knitr) {
+  ggsave(outliers_filename, plot=pc_plot, device="png", height= 40, width= 30, units="cm")
+}
+
+if (running_under_knitr) {
+  knitr::include_graphics(outliers_filename)
+} else {
+  plot_list
+}
+```
+
+Barplot of the explained variances
+
+```{r}
+
+variance <- read_delim(eigenvalue_filename, delim=" ", col_names = FALSE)
+print(head(variance))
+colnames(variance) <- "X1"
+variance <- variance %>%
+  mutate(PC = 1:n(),
+         plotted = 100 * X1/sum(X1))
+
+ggplot(variance, aes(y=plotted, x=PC)) + 
+  geom_bar(stat="identity") + 
+  labs(x = "Principal Component", y= "% Variance explained") + 
+  scale_x_continuous(breaks = 1:20, labels=1:20) + 
+  theme_classic2() + 
+  theme(axis.line.x = element_line(colour = "white"), 
+        axis.ticks.x = element_blank(), 
+        axis.text = element_text(size=12), 
+        axis.title=element_text(size=14))
+if (save_figs) {
+  ggsave(barplot_filename, device="png", height= 20, width= 30, units="cm")
+}
+```
+## Try to find outliers using the Aberrant package
+
+```{r}
+#library(aberrant)
+```
+
+```{r}
+# Plot the ith pair of principal components
+aberrant_function <- function(i){
+  xi <- column.combinations[1,i]
+  yi <- column.combinations[2,i]
+  xcolname <- sprintf("PC%i", xi)
+  ycolname <- sprintf("PC%i", yi)
+  x <- pca_and_population %>% filter(population %in% c("FinnGen")) %>% dplyr::select(all_of(xcolname), all_of(ycolname))
+  res <- aberrant::aberrant (x, lambda=30, alpha=1, beta=20, standardize= FALSE, uncorr = TRUE, verbose=FALSE)
+  res
+}
+```
+
+```{r}
+if (params$recompute_results || !file.exists(aberrant_results_filename)) {
+  future::plan(future::multisession, workers = 4)
+  results <- furrr::future_map(1:ncol(column.combinations), aberrant_function, .options = furrr::furrr_options(seed = TRUE))
+  save(results, file=aberrant_results_filename)
+} else {
+  load(aberrant_results_filename, verbose=TRUE)
+}
+NULL
+```
+
+Visualize the results. The ellipse is the 99% confidence area.
+
+Making a combined plot does not seem to work as aberrant.plot does not return anything.
+
+```{r}
+aberrant_plots <- map(results, aberrant::aberrant.plot)
+combined_aberrant_plot <- ggpubr::ggarrange(plotlist=aberrant_plots, common.legend=T, ncol=2, nrow=5, legend="bottom", labels = paste(LETTERS[1:length(aberrant_plots)], ")", sep=""))
+
+#running_under_knitr <- isTRUE(getOption('knitr.in.progress'))
+if (save_figs || running_under_knitr) {
+  ggsave(aberrant_outliers_filename, plot=combined_aberrant_plot, device="png", height= 40, width= 30, units="cm")
+}
+
+if (FALSE && running_under_knitr) {
+  knitr::include_graphics(aberrant_outliers_filename)  # does not work because aberrant.plot does not return anything
+} else {
+  invisible(aberrant_plots)
+}
+```
+
+We use the first two principal components to decide the outliers.
+Verify that we get the same number of outliers as in the figure.
+
+```{r}
+group <- results[[1]]$group
+table(group)
+```
+Get the ids of the outliers.
+
+```{r}
+outliers <- pca_and_population %>% filter(population %in% c("FinnGen")) %>% filter(group==1)
+outlier_ids <- outliers %>% pull(IID)
+if (TRUE) {
+  write_tsv(outliers %>% select(FID, IID), file = paste(result_dir, "outliers.tsv", sep="/"), col_names=FALSE)
+}
+head(outlier_ids)
+```
+## Median of principal components in each Municipality in Finland
+
+Get the map of Finnish municipalities
+
+```{r}
+mymap <- gadm_sf_loadCountries("FIN", level = 4)   # Level 4 contains the municipalities
+```
+
+Get information about Finnish post codes.
+
+```{r}
+postcode_filename <- "~/proj/interval_prediction/data/posti/PCF_20210406.dat"
+col_positions <- c(1, 6, 14, 19, 49, 79, 91, 103, 111, 112, 117, 147, 177, 180, 200, 220)
+col_names <- c(
+"Tietuetunnus",
+"Ajopäivämäärä",
+"Postinumero",
+"Postinumeron nimi suomeksi",
+"Postinumeron nimi ruotsiksi",
+"Postinumeron nimen lyhenne suomeksi",
+"Postinumeron nimen lyhenne ruotsiksi",
+"Voimaantulopäivämäärä",
+"Tyyppikoodi",
+"Hallinnollisen alueen koodi",
+"Hallinnollisen alueen nimi suomeksi",
+"Hallinnollisen alueen ruotsiksi",
+"Kunnan koodi",
+"Kunnan nimi suomeksi",
+"Kunnan nimi ruotsiksi",
+"Kunnan kielisuhdekoodi"
+)
+postcodes2 <- read_fwf(postcode_filename, col_positions = fwf_positions(start=col_positions, end=lead(col_positions)-1, col_names=col_names),
+                      locale = locale(encoding = "latin1"))
+postcodes <- postcodes2 %>% 
+  select(postcode="Postinumero", Municipality="Kunnan nimi suomeksi") %>%
+  mutate(postcode=as.integer(postcode))
+```
+
+Get the municipality of each blood donor from the eProgesa data
+
+```{r}
+donors <- read_delim("~/proj/interval_prediction/data/FRC.DW_DONOR.dat", delim="|", col_names = FALSE)
+donors <- donors %>% 
+  #mutate(Municipalities=str_to_sentence(X10)) %>%
+  rename(donor=X1, postcode=X9) %>%
+  mutate(postcode=as.integer(postcode)) %>%
+  inner_join(postcodes, by="postcode")
+bd_data <- donors %>% 
+  count(Municipality)
+```
+
+
+### Blood donors
+
+
+Number of donors in each municipality.
+
+```{r}
+kable(head(bd_data))
+```
+
+```{r}
+summary(bd_data %>% mutate(across(Municipality, as.factor)))
+#summary(bd_data)
+```
+How are the donors distributed among the municipalities?
+
+```{r}
+bd_data %>% ggplot(aes(n)) +
+  geom_histogram(binwidth = 1) +
+  scale_x_log10(labels=function(x) sprintf("%i", x)) +
+  labs(x="Number of blood donors", y="Number of municipalities")
+
+```
+
+Read final PCA data
+
+```{r}
+ultimate_pca <- read_delim(ultimate_eigenvector_filename, delim=" ", col_names = TRUE)
+```
+
+
+
+```{r}
+pca_and_municipality <- inner_join(donors, ultimate_pca, by=c("donor" = "IID"))# %>% rename(donor=X1, Municipalities=X10)
+```
+
+### Genotyped blood donors:
+
+```{r}
+summary(pca_and_municipality %>% count(Municipality) %>% mutate(across(Municipality, as.factor)))
+#summary(bd_data)
+```
+
+How are the genotyped donors distributed among the municipalities?
+
+```{r}
+pca_and_municipality %>% count(Municipality) %>% ggplot(aes(n)) +
+  geom_histogram(binwidth = 1) +
+  scale_x_log10(labels=function(x) sprintf("%i", x)) +
+  labs(x="Number of genotyped blood donors", y="Number of municipalities")
+
+```
+
+Plot those municipalities only with at least two donors.
+
+```{r}
+# Plot the given PCA component on the Finnish map
+color_by_pca <- function(data, component) {
+  data3 <- data %>% 
+    group_by(Municipality) %>%
+    filter(n() >= 2) %>%
+    summarise(m=median(get(component)))
+  
+  mybreaks <- seq(min(data3$m), max(data3$m), length.out=4)
+  
+  g1 <- data3 %>% ggplot(aes(x=m)) + geom_histogram(bins=30) + labs(x=sprintf("Median %s", component))
+  
+  #colbreaks = 5
+  #col <- viridis(colbreaks+2)[1:(colbreaks+2)]
+  number_of_categories=7
+  
+  #print(head(data3))
+  g2 <- choropleth(mymap, 
+             as.data.frame(data3),    # Needs to be a data.frame not a tibble!!!
+             adm.join = "Municipality",
+             value = "m",
+             breaks = "quantile",
+             steps = number_of_categories,
+#             breaks = mybreaks,
+#             palette="RdYlGn",
+#             palette="GnYlRd",
+#             palette=col,
+             palette=brewer.pal(number_of_categories, "RdYlGn"),
+             #palette="Oranges",
+             legend = sprintf("Median %s", component),
+             title=sprintf("Median %s in each municipality", component)) + 
+    guides(fill = guide_legend(direction="vertical", reverse=FALSE)) + 
+    theme(legend.position="right") 
+    
+  #print(class(g2))
+  ggarrange(plotlist=list(g1, g2), common.legend=FALSE, 
+            ncol=2, nrow=1, legend="right")  
+
+}
+```
+
+Plot the medians of the first five principal components on the Finnish map
+
+```{r}
+color_by_pca(pca_and_municipality, "PC1")
+color_by_pca(pca_and_municipality, "PC2")
+color_by_pca(pca_and_municipality, "PC3")
+color_by_pca(pca_and_municipality, "PC4")
+color_by_pca(pca_and_municipality, "PC5")
+```
+
+
+
+
+
+
+
+
+

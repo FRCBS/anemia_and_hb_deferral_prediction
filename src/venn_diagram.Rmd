@@ -1,0 +1,36 @@
+---
+title: "Untitled"
+author: "Jarkko Toivonen"
+date: "4/30/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(RVenn)
+```
+
+## R Markdown
+
+
+
+```{r cars}
+dir <- "~/FRCBS/blood_health_phewas/results"
+phenotype_ids <- readLines(paste(dir, "phenotype-ids.txt", sep="/"))
+covariate_ids <- readLines(paste(dir, "covariate-ids.txt", sep="/"))
+pca_ids <- readLines(paste(dir, "pca-ids.txt", sep="/"))
+```
+
+```{r}
+cat(sprintf("Number of phenotype ids: %i\n", length(phenotype_ids)))
+cat(sprintf("Number of covariate ids: %i\n", length(covariate_ids)))
+cat(sprintf("Number of pca ids: %i\n", length(pca_ids)))
+```
+
+```{r}
+  setlist <- list(phenotype=phenotype_ids, covariate = covariate_ids, pca=pca_ids)
+  plot <- ggvenn(Venn(setlist), thickness = 1.0, 
+                        fill = c("gold", "deeppink", "dodgerblue3"), 
+                         slice=c("phenotype", "covariate", "pca"))
+  plot
+```

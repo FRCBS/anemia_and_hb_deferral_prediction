@@ -1,0 +1,728 @@
+---
+title: "Compute phenotypes"
+author: "Jarkko Toivonen"
+date: "2/16/2021"
+output: md_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+suppressPackageStartupMessages(library(tidyverse))
+library(lubridate)
+library(readxl)
+library(RVenn)
+library("UpSetR")
+library(knitr)
+library(magrittr)  # for set_colnames
+
+source("common.R")
+
+# This can measure time a chunk took to execute.
+# Add chunk option time_it=TRUE to each chunk your want to measure.
+knitr::knit_hooks$set(time_it = local({
+  now <- NULL
+  function(before, options) {
+    if (before) {
+      # record the current time before each chunk
+      now <<- lubridate::now()
+    } else {
+      # calculate the time difference after a chunk
+      res <- lubridate::now() - now
+      # return a character string to show the time
+      msg <- paste("Time for this code chunk to run:", as.numeric(res), units(res))
+      message(msg)
+      NULL   # Don't return the message so that it won't be printed to the resulting document.
+    }
+  }
+}))
+
+
+knitr::opts_chunk$set(time_it=TRUE)
+
+threshold <- as_date("2019-12-31")   # Don't take donations newer than this
+write_results <- TRUE
+
+result_dir <- '~/FRCBS/blood_health_phewas/results'
+```
+
+
+
+
+```{r Functions}
+
+
+
+
+get_deferral <- function() {
+  deferral_filename <- "~/proj/interval_prediction/data/FRC.DW_DEFERRAL.DAT"
+  input_col_types <- list(
+    X1 = col_character(),
+    X2 = col_factor(),
+    X3 = col_date("%Y%m%d"),
+    X4 = col_date("%Y%m%d")
+  )
+  deferral <- read_delim(deferral_filename, delim="|", col_names = F, col_types = input_col_types)
+  
+  names(deferral) <- c("KEY_DONOR",
+                       "KEY_DEFERRAL_CODE",
+                       "KEY_DEFERRAL_DATE_START",
+                       "KEY_DEFERRAL_DATE_STOP")
+  
+  deferral <- 
+    deferral %>%
+    rename(donor = KEY_DONOR)
+  # Filter out donors with unrealistic deferral dates
+  old_count <- nrow(deferral); old_count2 <- ndonor(deferral)
+  deferral <- deferral %>%
+    filter(KEY_DEFERRAL_DATE_START > "1909-10-22") %>%
+    filter(KEY_DEFERRAL_DATE_START <= KEY_DEFERRAL_DATE_STOP)
+  cat(sprintf("dw_deferral: Dropped %i / %i deferrals (%i / %i donors) because of date older than 1909-10-22 or start_date > stop date\n",
+              old_count - nrow(deferral), old_count, old_count2 - ndonor(deferral), old_count2))
+  
+  # If there are multiple stop dates for a deferral, choose the latest
+  old_count <- nrow(deferral); old_count2 <- ndonor(deferral)
+  deferral <- deferral %>%
+    group_by(donor, KEY_DEFERRAL_CODE, KEY_DEFERRAL_DATE_START) %>%
+    slice_max(order_by=KEY_DEFERRAL_DATE_STOP, n=1) %>%
+    ungroup()
+  cat(sprintf("dw_deferral: Dropped %i / %i deferrals (%i / %i donors) because of multiple deferral stop dates\n",
+              old_count - nrow(deferral), old_count, old_count2 - ndonor(deferral), old_count2))
+  
+  return(deferral)
+}
+
+get_donation <- function(donation.file) {
+  # In the full dataset there lots of missing values. This causes automatic recognition of column types to fail.
+  # Therefore we give them explicitly here.
+  input_col_types <- list(
+    X1 = col_character(),
+    X2 = col_character(),
+    X3 = col_character(),
+    X4 = col_character(),
+    X5 = col_character(),
+    X6 = col_character(),
+    X7 = col_character(),
+    X8 = col_character(),
+    X9 = col_character(),
+    X10 = col_character(),
+    X11 = col_double(),
+    X12 = col_double()
+  )
+  
+  donation <- read_delim(donation.file, col_names=FALSE, delim='|', col_types=input_col_types)
+  cat(sprintf("Read %i rows from file %s\n", nrow(donation), donation.file))
+  names(donation)=c('donation', 'donor', 'site', 'date', 'phleb_start',
+                    'status', 'donat_phleb', 
+                    'directed', 'donStartTime', 'volume_drawn', 'index_test', 
+                    'Hb')
+  
+  old_count <- nrow(donation); old_count2 <- ndonor(donation)
+  donation <- 
+    donation %>%
+    mutate_at(c("status", "donat_phleb", "directed", "index_test"), as.factor) %>%
+    mutate_at("volume_drawn", as.integer) %>%
+    mutate(date = ymd(date)) %>%
+    filter(date <= threshold)
+  cat(sprintf("eProgesa: Dropped %i / %i donations (%i / %i donors) because of date greater than %s\n",
+              old_count - nrow(donation), old_count, old_count2 - ndonor(donation), old_count2, threshold))
+   
+  # Select the last attempt of the day
+  old_count <- nrow(donation); old_count2 <- ndonor(donation)
+  donation <- donation %>%
+    group_by(donor, date) %>%
+    slice_max(order_by = phleb_start, n = 1) %>%
+    ungroup()
+  cat(sprintf("eProgesa: Dropped %i / %i donations (%i / %i donors) because of choosing the last attempt of the day %s\n",
+              old_count - nrow(donation), old_count, old_count2 - ndonor(donation), old_count2, threshold))
+  
+  donation <- donation %>%
+    group_by(donor) %>%
+    mutate(previous_Hb = lag(Hb, order_by = date)) %>%
+    ungroup()
+  return(donation)
+}
+
+get_donor <- function(donor_file) {
+  input_col_types2 <- list(
+    X1 = col_character())
+  donors <- read_delim(donor_file, col_names=FALSE, delim="|", col_types = input_col_types2)
+  cat(sprintf("Read %i rows from file %s\n", nrow(donors), donor_file))
+  old_names <-
+    c("KEY_DONOR", "DONOR_FIRST", "DONOR_NAME", "KEY_DONOR_SEX", "KEY_DONOR_DOB", "DONOR_LANGUAGE", "KEY_DONOR_ABORH", "DONOR_ADDR_1_A", 
+    "KEY_DONOR_ZIP_1", "DONOR_CITY_1", "DONOR_TEL_1", "DONOR_E_MAIL", "DONOR_TEL_MOBILE", "DONOR_NOTIFIABLE", "DONOR_NOTIFICATION_METHOD_1", 
+    "DONOR_NOTIFICATION_METHOD_2", "DONOR_NOTIFICATION_METHOD_3", "DONOR_NB_DONATIONS", "DONOR_NB_DONAT_PROGESA", "DONOR_NB_DONAT_OUTSIDE", 
+    "DONOR_DATE_FIRST_DONATION", "DONOR_NB_WB", "DONOR_NB_PLA", "DONOR_NB_THR", "DONOR_LAST_DONAT_PHLEB", "DONOR_LAST_COLLECT")
+  names(donors) <- old_names
+  donors
+}
+
+get_age <- function(donor.file) {
+  input_col_types2 <- list(
+    X1 = col_character(),
+    X5 = col_character()
+    )
+  donor <- read_delim(donor.file, col_names=FALSE, delim="|", col_types = input_col_types2)
+  names(donor)=c('donor','first','family', 'gender', 'dob', 'language', 'aborh', 'address', 'zip', 'city',
+                 'tel','email', 'mobile',
+                 'notifiable', 'notification_method_1', 'notification_method_2', 'notification_method_3', 
+                 'nb_donations', 'nb_donat_progesa', 'nb_donat_outside', 
+                 'date_first_donation', 'nb_wb', 'nb_pla',
+                 'nb_thr', 'last_donat_phleb', 'last_collect'
+                 
+  )
+  donor <- donor %>%
+    mutate(dob = ymd(dob)) %>%
+    mutate(age = as.period(interval(start = dob, end = threshold))$year)
+  
+  return(donor %>% select(donor, age))
+}
+
+
+
+get_defects <- function() {
+  vanhat <- read_excel("~/proj/interval_prediction/data/Haitat 2010-2018.xlsx", sheet="listaus")
+  uudet <- read_excel("~/proj/interval_prediction/data/Haitat 2019-01-01--2020-04-30.xlsx")
+  defects <- bind_rows(vanhat, uudet)
+  defects <- defects %>% 
+    rename(donor="Luovuttaja koodi") 
+  old_count <- nrow(defects); old_count2 <- ndonor(defects)
+  defects <- defects %>%
+    filter(Rajoite_alkupvm <= threshold)
+  cat(sprintf("Defects: Dropped %i / %i donations (%i / %i donors) because Rajoite_alkupvm greater than %s\n",
+             old_count - nrow(defects), old_count, old_count2 - ndonor(defects), old_count2, threshold))
+  return(defects)
+}
+
+```
+
+```{r Load data sets}
+filename <- "~/FRCBS/blood_health_phewas/results/phenotype_data.Rdata"
+if (! file.exists(filename)) { 
+  deferral <- get_deferral()
+  donation <- get_donation("~/proj/interval_prediction/data/FRC.DW_DONATION.dat")
+  donor <- get_donor("~/proj/interval_prediction/data/FRC.DW_DONOR.dat")
+  age <- get_age("~/proj/interval_prediction/data/FRC.DW_DONOR.dat")   # age at date 'threshold'
+  finngen <- get_finngen()
+  finngen2 <- finngen %>% mutate(smoking = fct_explicit_na(smoking, na_level = NA))
+  fd_filename <- "~/proj/interval_prediction/data/DataFromMuriel/20181129/r02ds.donorData.rdata"
+  findonor <- load_single(fd_filename)
+  findonor <- findonor %>% anti_join(finngen2, by="donor") # There are four donors that are in both datasets.
+                                                           # In that case, use the information in FinnGen
+  findonor2 <- findonor %>% 
+    select(donor, weight, height, smoking=QR54, gender=Gender) %>%
+    mutate(smoking = fct_recode(smoking, 
+                                `yes, occassionally` = "sometimes",
+                                `yes, regularly` = "daily"),
+           smoking = factor(smoking, ordered = FALSE),
+           smoking = fct_explicit_na(smoking, na_level = NA))
+  finngen <- bind_rows(finngen2, findonor2)
+  save(list = c("deferral", "donation", "donor", "age", "finngen"), file = filename)
+} else {
+  load(filename, verbose = TRUE)
+}
+
+```
+
+```{r}
+create_venn <- function(setlist) {
+  plot <- RVenn::ggvenn(RVenn::Venn(setlist), thickness = 1.0, 
+                 fill = c("gold", "deeppink", "dodgerblue3"), 
+                 slice=names(setlist))
+  return(plot)
+}
+```
+
+Intersections of deferral, finngen, and donation dataframes.
+
+```{r}
+
+
+# Get intersection of donors
+donor_deferral <- deferral %>% pull(donor)
+donor_donation <- donation %>% pull(donor)
+donor_finngen <- finngen %>% pull(donor)
+
+setlist <- list(deferral=donor_deferral, donation=donor_donation, finngen=donor_finngen)
+plot <- create_venn(setlist)
+plot
+
+#intersection_donors <- intersect(intersect(donor_deferral, donor_donation), donor_finngen)
+intersection_donors <- intersect(donor_donation, donor_finngen)
+
+cat(sprintf("Intersection donors: %i, deferral: %i, donation: %i, FinnGen: %i\n", length(intersection_donors), 
+            length(donor_deferral), length(donor_donation), length(donor_finngen)))
+
+# Restrict to donors that are available in both eProgesa and in FinnGen
+deferral <- deferral %>% filter(donor %in% intersection_donors)
+donation <- donation %>% filter(donor %in% intersection_donors)
+finngen  <- finngen %>% filter(donor %in% intersection_donors)
+```
+
+## Compute the covariates
+
+```{r Compute covariates}
+covariates <- finngen %>% 
+  mutate(sex=ifelse(gender=="Women", 1, 0),
+         smoking=ifelse(smoking!="no", 1, 0)) %>%
+  select(donor, sex, weight, height, smoking)   # Should we compute the age at the end of 2019?
+  
+covariates <- covariates %>%   # Add the recomputed age
+  inner_join(age, by="donor")
+```
+
+
+## Compute the phenotypes
+
+```{r Compute phenotypes}
+
+donor2 <- donor %>% select(donor=KEY_DONOR, sex=KEY_DONOR_SEX)
+if (! "sex" %in% names(donation)) {
+  donation <- donation %>% inner_join(donor2, by="donor")
+}
+
+tmp <- deferral %>% 
+  group_by(donor, KEY_DEFERRAL_DATE_START) %>% 
+  summarise(S821_or_P821 = length(intersect(KEY_DEFERRAL_CODE, c("S821", "P821"))) >= 1, .groups="drop") %>%
+  filter(S821_or_P821 == TRUE) %>% 
+  mutate(KEY_DEFERRAL_CODE="S821_or_P821") %>% 
+  select(-S821_or_P821) %>%
+  left_join(donation, by=c("donor"="donor", "KEY_DEFERRAL_DATE_START"="date"))
+
+# A donor can also be deferred if his/her Hb drops by 20 unit since last visit
+S821_or_P821 <- tmp %>% 
+  filter(((sex=="Man" & Hb < 135) | (sex=="Woman" & Hb < 125)) | (previous_Hb - Hb > 20)) %>%
+  select(donor, KEY_DEFERRAL_CODE, KEY_DEFERRAL_DATE_START)
+
+bad  <- tmp %>% filter(((sex=="Man" & Hb >= 135) | (sex=="Woman" & Hb >= 125) & (previous_Hb - Hb < 20)))
+cat(sprintf("In %s deferral cases Hb was above threshold but Hb hadn't drop by at least 20 units", nrow(bad)))                                
+
+hb_stuff <- donation %>% 
+  group_by(donor) %>% 
+  summarise(hb_median=median(Hb, na.rm=T), hb_mad=mad(Hb, na.rm=T), tries=n()) %>%
+  drop_na()
+
+
+# How should we define a donation here? Should we get it directly from some progesa field?
+successful_donations <- donation %>% 
+  filter(donat_phleb == "K") 
+
+lifetime_donations <- successful_donations %>% 
+  group_by(donor) %>% 
+  summarise(lifetime_donations = n())
+
+last_two_years_donations <- successful_donations %>%
+  filter(date >= threshold - years(2)) %>%   
+  group_by(donor) %>% 
+  summarise(last_two_years_donations = n())
+
+
+
+# Different deferral categories' fractions
+count_S821 <- deferral %>% filter(KEY_DEFERRAL_CODE=="S821") %>% count(donor, name="count_S821")
+count_P821 <- deferral %>% filter(KEY_DEFERRAL_CODE=="P821") %>% count(donor, name="count_P821")
+count_P820 <- deferral %>% filter(KEY_DEFERRAL_CODE=="P820") %>% count(donor, name="count_P820")
+bin_S821 <- count_S821 %>% mutate(bin_S821 = as.integer(count_S821 > 0)) %>% select(donor, bin_S821)
+bin_P821 <- count_P821 %>% mutate(bin_P821 = as.integer(count_P821 > 0)) %>% select(donor, bin_P821)
+bin_P820 <- count_P820 %>% mutate(bin_P820 = as.integer(count_P820 > 0)) %>% select(donor, bin_P820)
+
+count_S821_or_P821 <- S821_or_P821 %>% 
+  filter(KEY_DEFERRAL_CODE=="S821_or_P821") %>% 
+  count(donor, name="count_S821_or_P821")
+bin_S821_or_P821 <- count_S821_or_P821 %>% 
+  mutate(bin_S821_or_P821 = count_S821_or_P821 > 0) %>% 
+  select(donor, bin_S821_or_P821)
+
+defects <- get_defects()
+
+# Serious local effects
+local_effect_codes <- str_split("H1M0 H1V1 H1VL H1ML H2V0 H2VL H3V0 H3M0 H5V0 H5M0 H3VL H5ML H3ML H4M0 H4ML", " ")[[1]]   # old
+#codes1 <- str_split("H01E H01L H02E H02L H03E H03L H04E H04L H05E H05L", " ")[[1]]   # New CRM
+#serious_local_ever <- defects %>% filter(Rajoite_koodi %in% codes1) %>% count(donor, name="serious_local_ever")
+serious_local_ever <- defects %>% group_by(donor) %>% summarise(serious_local_ever=max(Rajoite_koodi %in% local_effect_codes))
+
+# Fainting
+fainting_codes <- str_split("H6V1 H6V3 H6M1 H6M3 H6VL H6ML H6V2", " ")[[1]]   # old
+better_fainting_codes <- str_split("H6V1 H6V3 H6VL H6V2", " ")[[1]]   # old # No later faintings here
+#codes2 <- str_split("H06L H07E H07L H08E H08L", " ")[[1]]   # New CRM
+#fainting_ever <- defects %>% filter(Rajoite_koodi %in% codes2) %>% count(donor, name="fainting_ever")
+fainting_ever <- defects %>% group_by(donor) %>% summarise(fainting_ever=max(Rajoite_koodi %in% fainting_codes))
+
+later_fainting <- setdiff(fainting_codes, better_fainting_codes)
+
+compute_better_fainting <- function(donation, defects) {  
+  df <- left_join(donation, defects, by=c("donor", "date"="Rajoite_alkupvm")) %>%
+    group_by(donor) %>% 
+    summarise(better_fainting_ever=max(case_when(
+      Rajoite_koodi %in% better_fainting_codes & volume_drawn > 0 ~ 1,
+      Rajoite_koodi %in% later_fainting | (Rajoite_koodi %in% better_fainting_codes & volume_drawn <= 0) ~ NA_real_,
+      TRUE ~ 0
+      )))
+  return(df)
+}
+better_fainting_ever <- compute_better_fainting(donation, defects)
+
+# Get sTfR
+filename <- "~/FRCBS/blood_health_phewas/cambridge_collaboration/data/pheno.rds"
+stfr <- readRDS(filename)
+stfr <- stfr %>% select(donor, stfr)
+
+# Join all results into one dataframe
+phenotypes <- hb_stuff
+phenotypes <- left_join(phenotypes, lifetime_donations)
+phenotypes <- left_join(phenotypes, last_two_years_donations)
+phenotypes <- left_join(phenotypes, count_S821)
+phenotypes <- left_join(phenotypes, count_P821)
+phenotypes <- left_join(phenotypes, count_P820)
+phenotypes <- left_join(phenotypes, count_S821_or_P821)
+phenotypes <- left_join(phenotypes, bin_S821)
+phenotypes <- left_join(phenotypes, bin_P821)
+phenotypes <- left_join(phenotypes, bin_P820)
+phenotypes <- left_join(phenotypes, bin_S821_or_P821)
+phenotypes <- left_join(phenotypes, serious_local_ever)
+phenotypes <- left_join(phenotypes, fainting_ever)
+phenotypes <- left_join(phenotypes, better_fainting_ever)
+phenotypes <- left_join(phenotypes, stfr)
+
+
+phenotypes <- phenotypes %>% 
+  replace_na(list(lifetime_donations=0, last_two_years_donations=0, 
+                  count_S821=0, count_P821=0, count_P820=0, count_S821_or_P821=0, 
+                  bin_S821=0, bin_P821=0, bin_P820=0, bin_S821_or_P821=0, 
+                  serious_local_ever=0, fainting_ever=0))
+#, better_fainting_ever=0)) # We allow NA here, they will be dropped later.
+```
+
+## Counts of adverse effects in donors.
+
+```{r}
+variables <- c("count_S821", "count_P821", "count_P820", "count_S821_or_P821",
+               "bin_S821", "bin_P821", "bin_P820", "bin_S821_or_P821",
+               "serious_local_ever", "fainting_ever", "better_fainting_ever")
+summary(phenotypes %>% transmute_at(variables, as.factor))
+```
+
+```{r}
+# Convert counts to fractions
+phenotypes <- phenotypes %>%
+  mutate(S821 = count_S821 / tries,
+         P821 = count_P821 / tries,
+         P820 = count_P820 / tries
+  )
+```
+
+## Covariates
+
+```{r Covariate summary}
+summary(covariates %>% mutate(across(c(sex, smoking), as.factor)))
+```
+
+```{r Covariate plot}
+covar_g <- covariates %>% 
+  select(-donor) %>% 
+  gather() %>% 
+  ggplot(aes(value)) + 
+  facet_wrap(~key, scale="free") + 
+  geom_histogram()
+covar_g
+```
+
+## Phenotypes
+
+```{r Phenotype summary}
+summary(phenotypes %>% mutate(across(c(bin_S821, bin_P821, bin_P820, bin_S821_or_P821, serious_local_ever, fainting_ever, better_fainting_ever), as.factor)))
+```
+
+```{r Phenotype descriptions}
+phenotype_description <- tibble(
+  phenotype=c("hb_median", "hb_mad", "tries", "lifetime_donations", "last_two_years_donations", 
+              "S821", "P821", "P820", 
+              "count_S821", "count_P821", "count_P820", "count_S821_or_P821",
+              "bin_S821", "bin_P821", "bin_P820", "bin_S821_or_P821", 
+              "serious_local_ever", "fainting_ever", "better_fainting_ever", "stfr"),
+  type=c("continuous", "continuous", "count", "count", "count", 
+         "fraction", "fraction", "fraction",
+         "count", "count", "count", "count",
+         "binary", "binary", "binary", "binary", 
+         "binary", "binary", "binary", "continuous"),
+  description=c("Lifetime median Hb", "Lifetime mean absolute deviation", "Lifetime donation attempts", "Lifetime donations", "Donation during the last two years", 
+                "Fraction of deferrals because Hb < threshold - 10", "Fraction of deferrals because Hb < threshold - 20",
+  "Fraction of deferrals because female Hb > 175 or male Hb > 195",
+  "Count of S821", "Count of P821", "Count of P820", "Count of S821_or_P821", 
+"Any deferrals because Hb < threshold - 10", "Any deferrals because Hb < threshold - 20",
+  "Any deferrals because female Hb > 175 or male Hb > 195", "Any S821 or P821 deferrals",
+  "Serious local defect ever", "Fainting ever", "Fainting during donation ever",
+"Soluble transferrin receptor"))
+knitr::kable(phenotype_description)
+```
+
+
+```{r Phenotype plot}
+pheno_g <- phenotypes %>% 
+  select(-donor) %>% 
+  gather() %>% 
+  mutate(key=factor(key, levels=phenotype_description$phenotype)) %>%
+  ggplot(aes(value)) + 
+  facet_wrap(~key, scale="free", ncol=4) + 
+  geom_histogram()
+pheno_g
+```
+
+Correlations of phenotypes.
+
+```{r Correlations}
+corrplot::corrplot(cor(phenotypes %>% select(-donor) %>% drop_na(-stfr)))
+```
+
+Create sets of donors based on binary variables, and see how the sets overlap.
+
+```{r UpSetR}
+create_set <- function(df, variable) {
+  df %>% filter(.data[[variable]]==1.0) %>% pull(donor)
+}
+binary_variables <- c("bin_S821", "bin_P821", "bin_P820", "bin_S821_or_P821", 
+                      "serious_local_ever", "fainting_ever", "better_fainting_ever")
+#helper(phenotypes, "bin_S821")
+sets <- map(binary_variables, function(variable) create_set(phenotypes, variable))
+names(sets) <- binary_variables
+upset(fromList(sets), order.by = "freq")
+```
+
+
+```{r Write results}
+if (write_results) {
+  #d <- "2021-08-31"
+  d <- Sys.Date()
+  ggsave(sprintf("%s/phenotypes-%s.png", result_dir, d), pheno_g)
+  ggsave(sprintf("%s/covariates-%s.png", result_dir, d), covar_g)
+  write_delim(covariates, sprintf("%s/covariates-%s.txt", result_dir, d), "\t", col_names = TRUE)
+  write_delim(phenotypes, sprintf("%s/phenotypes-%s.txt", result_dir, d), "\t", col_names = TRUE)
+}
+
+```
+
+## Analyze the fainting cases
+
+How many faintings are there?
+
+```{r}
+fainting_defects <- defects %>% 
+  filter(Rajoite_koodi %in% fainting_codes) 
+kable(fainting_defects %>% 
+  count(Rajoite_koodi, Rajoite_selite))
+```
+
+Some of the above codes don't seem to be faintings at all! Let's try to find all fainting codes:
+
+```{r}
+kable(defects %>% filter(str_detect(Rajoite_selite, "[Pp]yört")) %>% count(Rajoite_koodi, Rajoite_selite))
+```
+
+```{r}
+
+better_fainting_defects <- defects %>% 
+  filter(Rajoite_koodi %in% better_fainting_codes)
+```
+
+How long in days is the "restriction"?
+
+```{r}
+unique(better_fainting_defects$Rajoite_loppupvm - better_fainting_defects$Rajoite_alkupvm)
+```
+Get the explanations of Status and Donat_phleb variables in eProgesa
+
+```{r, message=FALSE}
+helper <- function(df) {
+  df <- df %>% 
+    transmute(a=str_split(...1, fixed("|"))) %>%
+    unnest_wider(col=a, names_repair="minimal") %>%
+    set_colnames(c("Code", "Explanation")) %>%
+    mutate(Explanation=str_remove_all(Explanation, "\""))
+  df
+}
+eProgesa_description_filename <- "~/proj/interval_prediction/data/Tilasto - eProgesa_datakentät_taulukkona (ID 7609).xlsx"
+dfs2 <- map(c("Status"="Status", "Type"="Type"), function(sheet) read_excel(eProgesa_description_filename, sheet=sheet, col_names=FALSE))
+dfs <- map(dfs2, helper)
+kable(dfs$Status)
+kable(dfs$Type)
+```
+
+How do the donations related to faintings look like? Note that the counts here are much smaller than above
+because I have restricted the donations to the FinnGen donors and I have taken only donations before 2019-12-31.
+
+```{r}
+better_fainting_donations <- inner_join(donation, better_fainting_defects, by=c("donor", "date"="Rajoite_alkupvm"))
+
+summary(better_fainting_donations %>% select(date, status, donat_phleb, directed, volume_drawn, Hb, Ikä_luovutushetkellä, Ikä_tänään))
+```
+
+Counts of defects among FinnGen blood donors before 2019-12-31.
+
+```{r Counts of defects in FinnGen}
+kable(better_fainting_donations %>% 
+  count(Rajoite_koodi, Rajoite_selite))
+```
+
+Show separate summaries for each Rajoite_selite:
+
+```{r}
+group_walk(better_fainting_donations %>% group_by(Rajoite_selite), 
+           function(x,y) {
+             cat(sprintf("\nDefect code: %s\n\n", y$Rajoite_selite))
+             print(summary(x %>% select(status,donat_phleb, directed, volume_drawn)))
+             } )
+```
+
+The volume_drawn in more detail:
+
+```{r}
+table(better_fainting_donations %>% select(volume_drawn, Rajoite_selite))
+```
+
+## Check what the deferral codes actually mean
+
+```{r}
+donor2 <- donor %>% select(donor=KEY_DONOR, sex=KEY_DONOR_SEX)
+combined <- donation %>% 
+  inner_join(deferral, by=c("donor", "date"="KEY_DEFERRAL_DATE_START")) %>%
+  #inner_join(donor2, by="donor") %>%
+  filter(KEY_DEFERRAL_CODE %in% c("S821", "P821", "P820"))
+```
+
+The Hb limits for the deferral classes seem to be vague!
+
+```{r}
+hb_range <-combined %>% 
+  drop_na(Hb) %>%  # There are NA values for classes S821 and P821!!!!
+  group_by(sex, KEY_DEFERRAL_CODE) %>%
+  summarise(min=min(Hb), max=max(Hb), .groups = "drop")
+hb_range
+```
+
+```{r}
+generate_my_breaks <- function(step) {
+  # Break between limits at every position that is multiple of 'step' 
+  my_breaks <- function(limits) {
+    #step <- 0.2
+    m <- limits %/% step
+    m <- ifelse(m < 0, m+1, m)
+    m <- m*step
+    return(seq(m[1], m[2], step))
+  }
+  return(my_breaks)
+}
+
+```
+
+
+```{r}
+combined2 <-combined %>% 
+  drop_na(Hb) %>%  # There are NA values for classes S821 and P821!!!!
+  mutate(class=str_c(KEY_DEFERRAL_CODE, sex, sep = " "))
+```
+
+The main blobs seem to have Hb range of 10.
+
+```{r Sina plot of Hb versus deferral class}
+limits <- tribble(
+  ~class, ~ymin, ~ymax,
+  "S821 Woman", 115, 124,
+  "S821 Man", 125, 134,
+  "P821 Woman", -Inf, 114,
+  "P821 Man", -Inf, 124,
+  "P820 Woman", 175, Inf,
+  "P820 Man", 195, Inf
+)
+g <- combined2 %>% ggplot(aes(class, Hb)) + 
+  ggforce::geom_sina() + 
+  geom_errorbar(mapping=aes(x=class, ymin=ymin, ymax=ymax),
+                 data=limits,
+                 inherit.aes = FALSE, linetype="solid", color="red") +
+  scale_y_continuous(breaks = generate_my_breaks(10)) +
+  coord_flip()
+g
+```
+
+Boxplot is less clear than sina plot.
+
+```{r Boxplot of Hb versus deferral class}
+combined2 %>% ggplot(aes(class, Hb)) + 
+  geom_boxplot() + 
+  scale_y_continuous(breaks = generate_my_breaks(10)) +
+  coord_flip()
+```
+
+What could the limits be?
+
+```{r Barplot of Hb in deferral class range}
+combined2 %>% 
+  filter((class=="S821 Woman" & 113 <= Hb & Hb <= 127) |
+           (class=="S821 Man" & 123 <= Hb & Hb <= 137) |
+           (class=="P821 Woman" & 100 <= Hb & Hb <= 117) |
+           (class=="P821 Man" & 110 <= Hb & Hb <= 127) |
+           (class=="P820 Woman" & 173 <= Hb) |
+           (class=="P820 Man" & 193 <= Hb)
+  ) %>% 
+  mutate(class = fct_relevel(class, c("P821 Man", "S821 Man", "P820 Man", "P821 Woman", "S821 Woman", "P820 Woman"))) %>%
+  ggplot(aes(Hb)) + 
+  geom_bar() + 
+  #facet_grid(KEY_DEFERRAL_CODE ~ sex, scales="free")
+  facet_wrap(vars(class), scales="free")
+```
+
+So, it would seem that the limits are:
+P821: Hb <= 124 (male), Hb <= 114 (female)
+S821: 125 <= Hb <= 134 (male), 115 <= Hb <= 124 (female)
+P820: inconclusive, but maybe 195 < Hb (male), 175 < Hb (female) 
+
+Donors and days that don't fit the deferral class:
+
+```{r Misclassification as a function of time}
+odd_keys <- combined2 %>% 
+  filter((class=="S821 Woman" & (Hb <= 114 | 125 <= Hb)) |
+           (class=="S821 Man" & (Hb <= 124 | 135 <= Hb)) |
+           (class=="P821 Woman" & 115 <= Hb) |
+           (class=="P821 Man" & 125 <= Hb)
+  ) %>%
+  select(donor, date) #%>%
+  #distinct()
+
+cat(sprintf("There are %i donations whose Hb does not agree with their deferral class\n", nrow(odd_keys)))
+
+odd_keys %>% ggplot(aes(date)) +
+  geom_histogram()
+```
+
+```{r}
+odd_donor_days <- inner_join(donation, donor2, by="donor") %>% 
+  semi_join(odd_keys)
+
+# How many donations per day?
+odd_donor_days %>% count(donor, date) %>% pull(n) %>% table
+```
+
+Are there multiple donation attempts per day per donor?
+
+```{r}
+donation %>% count(donor, date) %>% count(n) %>% rename("Attempts per day"=n, "Donor days"=nn)
+```
+
+
+Are there multiple deferral codes per day and donor in the deferral table?
+
+```{r}
+deferral %>% 
+  filter(KEY_DEFERRAL_CODE %in% c("S821", "P821", "P820")) %>% 
+  group_by(donor, KEY_DEFERRAL_DATE_START) %>% 
+  #filter(n() > 1) %>% 
+  summarise(codes=as.factor(paste(sort(KEY_DEFERRAL_CODE), collapse=" ")), n=n(), .groups="drop") %>% 
+  summary()
+```
+
+But even these don't explain all the 813 mislabeled donations!
+
+
+
+
+
+
+

@@ -1,0 +1,60 @@
+---
+title: "R Notebook"
+output: md_document
+---
+
+
+
+```{r setup}
+library(tidyverse)
+library(readxl)
+```
+
+# Years 2010 - 2018
+
+```{r}
+yhteenveto <- read_excel("~/proj/interval_prediction/data/Haitat 2010-2018.xlsx", sheet="yhteenveto")
+listaus <- read_excel("~/proj/interval_prediction/data/Haitat 2010-2018.xlsx", sheet="listaus")
+```
+
+
+```{r}
+summary(yhteenveto)
+summary(listaus)
+```
+```{r}
+sort(unique(yhteenveto$Rajoite_koodi))
+```
+
+
+```{r}
+sort(unique(listaus$Rajoite_koodi))
+```
+
+# Year 2019 - 2020
+
+```{r}
+
+df <- read_excel("~/proj/interval_prediction/data/Haitat 2019-01-01--2020-04-30.xlsx")
+```
+
+```{r}
+summary(df)
+```
+
+```{r}
+sort(unique(df$Rajoite_koodi))
+```
+
+Most donations starting from year 2019 don't have yet all the codes appearing:
+```{r}
+v1 <- unique(yhteenveto$Rajoite_koodi)
+v2 <- unique(df$Rajoite_koodi)
+cat("Intersection:\n")
+intersect(v1, v2)
+cat("Setdiff:\n")
+setdiff(v1, v2)
+cat("Setdiff:\n")
+setdiff(v2, v1)
+```
+

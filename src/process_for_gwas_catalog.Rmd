@@ -1,0 +1,31 @@
+---
+title: "Postprocess GWAS for GWAS catalog"
+author: "Jarkko Toivonen"
+date: "6/1/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+
+```{r}
+filename <- "/home/toivoja/FRCBS/blood_health_phewas/phewas-30k/results/saigeio/output/results.bin_S821_or_P821.all.summary_statistics.txt.gz"
+df2 <- read_delim(filename, 
+                  #n_max = 100, 
+                  delim = " ")
+```
+
+
+```{r}
+df <- df2 %>% 
+  mutate(variant_ID=NA) %>%
+  select(variant_ID, chromosome=CHR, base_pair_location=POS, p_value=p.value, effect_allele=Allele2, other_allele=Allele1,
+         effect_allele_frequency=AF_Allele2, beta=BETA, standard_error=SE)
+```
+
+```{r}
+write_tsv(df, file = "~/FRCBS/blood_health_phewas/gwas_catalog/hb_deferral.tsv")
+```
+
