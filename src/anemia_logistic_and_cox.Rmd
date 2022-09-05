@@ -33,7 +33,7 @@ library(ggstance)
 library(knitr)
 library(kableExtra)
 #library(tictoc)
-allow_individual_level_data <- FALSE
+allow_individual_level_data <- TRUE
 recompute_dosages <- FALSE
 recompute_survival <- FALSE
 recompute <- FALSE
@@ -42,6 +42,7 @@ save_figs <- FALSE
 base <- "/finngen/red/toivoja/anemia-gwas/logistic_regression"
 fig_path <- sprintf("%s/figures", base)
 data_path <- sprintf("%s/data", base)
+table_path <- sprintf("%s/tables", base)
 
 source("common.R")
 
@@ -93,7 +94,9 @@ to_encoded <- function(d, v) {
   d %>% filter(Variable==v) %>% mutate(t = ifelse(Type=="boolean", sprintf("%sTRUE", Variable), Variable)) %>% pull(t)
 }
 
-
+# d is a variable description dataframe. 
+# interactions is of form c("blood_donor:weight", "blood_donor:smoking")
+# Return a dataframe where the interactions are added.
 add_interaction_descriptions <- function(d, interactions, encoded=FALSE) {
   helper <- function(int) {
     ab <- str_split_fixed(int, ":", n=2)[1,]
@@ -162,12 +165,13 @@ pvalue_table <- function(df) {
 
 
 ```{r Helper functions}
+
+
 # Input is a dataframe that has a factor column whose name is given as parameter
 # Returns a dataframe with two columns
 # stripe column has alternating values 0 and 1
 # the other column contains the levels of the specified column
 make_stripes <- function(df, Variable) {
-  #v <- levels(df[[name]])
   v <- df %>% pull({{Variable}})
   if (is.factor(v)) {
     v <- levels(v)
@@ -176,6 +180,13 @@ make_stripes <- function(df, Variable) {
   }
   tibble({{Variable}} := factor(v, levels=v)) %>% 
      mutate(stripe = row_number() %% 2)
+}
+
+geom_stripes <- function(df, Variable) {
+  geom_rect(data=make_stripes(df, Variable) %>% filter(stripe==1),
+            mapping=aes(ymax = as.numeric(Variable) + 0.5,
+                        ymin = as.numeric(Variable) - 0.5),
+            fill = "gray", xmin=-Inf, xmax=Inf, alpha = 0.5, show.legend = FALSE, colour=NA, inherit.aes = FALSE)
 }
 
 self_made_cis <- function(fit) {
@@ -374,24 +385,23 @@ get_finngen <-function() {
 }
 finngen <- get_finngen()
 # Fix the age so that it is the age now or at first event
-#survival_filename <- sprintf("%s/survival.rds", data_path)
-#tmp <- readRDS(survival_filename) %>% ungroup() %>% rename(event_age=age)
-#tmp2 <- left_join(finngen, tmp, by="donor")
 joined <- left_join(finngen, anemia_endpoint, by=c(donor="FINNGENID"))
 # Why are the ages different between AGE_AT_DEATH_OR_NOW and D3_ANAEMIA_IRONDEF_AGE even when anemia has not occurred?
 # Apparently, if an endpoint has not occurred, the endpoint_age is FU_END_AGE.
+# Visualize this difference
 joined %>% mutate(diff=D3_ANAEMIA_IRONDEF_AGE-AGE_AT_DEATH_OR_NOW, 
                   anemia = as.character(anemia)) %>%
   ggplot(aes(x=diff, color=anemia)) + 
   geom_freqpoly() +
   scale_y_log10()
+
 finngen <- joined %>% 
   mutate(age = ifelse(anemia==1, D3_ANAEMIA_IRONDEF_AGE, AGE_AT_DEATH_OR_NOW)) %>%
   select(!starts_with("D3_ANAEMIA_IRONDEF") & ! any_of("AGE_AT_DEATH_OR_NOW"))
 
-old_n <- nrow(finngen)
+#old_n <- nrow(finngen)
 finngen <- finngen %>% 
-  drop_na(any_of(variables)) %>%
+  #drop_na(any_of(variables)) %>%
   mutate(smoking = as.logical(smoking),
          anemia = as.logical(anemia),
          sex = as.factor(sex),
@@ -399,7 +409,7 @@ finngen <- finngen %>%
   mutate(group = factor(case_when(!female ~ "male",
                                   female & age < 45 ~ "pre_menopausal_female",
                                   female & age >= 45 ~ "post_menopausal_female")))
-cat(sprintf("Dropping %i/%i rows due to NA in metadata variables\n", old_n - nrow(finngen), old_n))
+#cat(sprintf("Dropping %i/%i rows due to NA in metadata variables\n", old_n - nrow(finngen), old_n))
 
 #  mutate(bmi = weight / (height / 100)**2,
 #         smoking=ifelse(smoking %in% c("yes, occassionally", "yes, regularly"), TRUE, FALSE))
@@ -470,19 +480,21 @@ split_set3 <- function(df, seed, prob=tvt_ratios, donor_field = "KEY_DONOR") {
 
 
 ```{r Combine datas}
-filename <- sprintf("%s/combined_data.rds", data_path)
+filename <- sprintf("%s/unfiltered_combined_data.rds", data_path)
 if (recompute | !file.exists(filename)) {
-  combined_data <- left_join(finngen, donations) %>%
-    replace_na(list(blood_donor=FALSE)) %>%
-    inner_join(dosages) %>%
-    inner_join(scores)
+  unfiltered_combined_data <- finngen %>%
+    full_join(dosages) %>%
+    full_join(scores) %>%
+    left_join(donations) %>%
+    replace_na(list(blood_donor=FALSE))
+
   
-  combined_data <- split_set3(combined_data, seed=42, donor_field = "donor")
-  saveRDS(combined_data, filename)
+  unfiltered_combined_data <- split_set3(unfiltered_combined_data, seed=42, donor_field = "donor")
+  saveRDS(unfiltered_combined_data, filename)
 } else {
-  combined_data <- readRDS(filename)
+  unfiltered_combined_data <- readRDS(filename)
 }
-summary(combined_data %>% mutate(across(starts_with("snp_"), as.factor)))
+summary(unfiltered_combined_data %>% mutate(across(starts_with("snp_"), as.factor)))
 
 ```
 
@@ -499,18 +511,31 @@ check_anemia <- function(data) {
   cat(sprintf("Anemia among blood donors %.4f%%\n", tf %>% filter(blood_donor) %>% pull(freq)))
   cat(sprintf("Anemia among non blood donors %.4f%%\n", tf %>% filter(!blood_donor) %>% pull(freq)))
 }
-check_anemia(combined_data)
+check_anemia(unfiltered_combined_data)
 ```
 
 ```{r Drop missing values}
 model_variables <- c("anemia", variables)
 cat(sprintf("Model variables are %s\n", paste(model_variables, collapse=", ")))
-old_n <- nrow(combined_data)
-combined_data <- combined_data %>% drop_na({{model_variables}})
+exclusions_anemia_logistic <- unfiltered_combined_data %>% summarise(across({{model_variables}}, ~ sum(is.na(.))))
+filename <- sprintf("%s/exclusions_anemia_logistic.tsv", base)
+write_tsv(exclusions_anemia_logistic, filename)
+t(exclusions_anemia_logistic)
+old_n <- nrow(unfiltered_combined_data)
+combined_data <- unfiltered_combined_data %>% drop_na({{model_variables}})
 cat(sprintf("Dropping %i/%i rows due to NA in model variables\n", old_n - nrow(combined_data), old_n))
-
 ```
 
+
+```{r}
+check_anemia(combined_data)
+```
+
+```{r Drop non-adults}
+young_combined_data <- combined_data %>% filter(age < 18)
+combined_data <- combined_data %>% filter(age >= 18) # Drop children
+cat(sprintf("Dropped %i individuals because they were below 18 of age\n", nrow(young_combined_data)))
+```
 
 ```{r}
 check_anemia(combined_data)
@@ -548,7 +573,15 @@ g2
 ```{r Summaries of stratified data}
 for (g in c("male", "pre_menopausal_female", "post_menopausal_female")) {
   cat(sprintf("\n*** Group %s ***\n\n", g))
-  print(summary(combined_data %>% filter(group == {{g}}) %>% mutate(across(starts_with("snp_"), as.factor))))
+  if (g == "pre_menopausal_female" && !allow_individual_level_data) {
+    allowed_levels <- 0:1
+  } else {
+    allowed_levels <- 0:2
+  }
+  print(summary(combined_data %>% 
+                  filter(group == {{g}}) %>% 
+                  filter(snp_17_58358769 %in% allowed_levels) %>%
+                  mutate(across(starts_with("snp_"), as.factor))))
 }
 ```
 
@@ -633,18 +666,132 @@ g
 ```
 
 
-### Split the data to train, validate, and test sets
 
-```{r, eval=FALSE}
-train <- combined_data %>% filter(label == "train")
-validate <- combined_data %>% filter(label == "validate")
-test <- combined_data %>% filter(label == "test")
-nrow(train)
-nrow(validate)
-nrow(test)
+
+```{r}
+double_summary_plotter_case_control <- function(df, variable_descriptions, geom = "freqpoly", breaks=waiver(), ncol=NULL) {
+  #df <- bind_rows(case=case_df, control=control_df, .id="Status")
+  #print(df, 5)
+  df <- df %>%
+    mutate(across(where(is.logical), as.integer)) %>%
+    #keep(is.numeric(col) %>%
+    select(where(is.numeric) | c("Status", "sex")) %>%
+    to_pretty(variable_descriptions) %>%
+    #gather() %>%
+    pivot_longer(!c("Status", "Sex")) #%>%
+    #mutate(name = factor(name, levels=variable_descriptions$Pretty))   # Don't sort alphabetically
+  
+
+  if (geom=="freqpoly") {
+    g <- df %>%
+      ggplot(aes(value, color=Status)) +
+      facet_wrap(~ name, scales = "free", ncol=ncol) +
+      geom_freqpoly() +
+      scale_x_continuous(breaks=breaks)
+  } else if (geom=="histogram") {
+    g <- df %>%
+      ggplot(aes(value, fill=Status)) +
+      facet_wrap(~ name, scales = "free", ncol=ncol) +
+      geom_histogram(position="dodge") +
+      scale_x_continuous(breaks=breaks)
+  } else if (geom=="hollow_histogram") {
+    g <- df %>%
+      ggplot(aes(value, color=Sex)) +
+      #facet_grid(name ~ Status, scales = "free") +
+      ggh4x::facet_grid2(rows=vars(name), cols=vars(Status), scales = "free", independent = TRUE) + 
+      geom_histogram(fill=NA) +
+      scale_x_continuous(breaks=breaks)
+  } else {
+    stop(sprintf("Unknow value for the geom parameter: %s", geom))
+  }
+
+  return(g)
+}
+
 ```
 
+```{r}
+# Function to to unify x axis ranges on each row.
+# Returns a list of scales that can be passed as a parameter to the ggh4x::facetted_pos_scales function,
+# to modify individual panels in a facetted plot
+unify_range_by_rows <- function(g) {
+  b <- ggplot_build(g)
+  L <- length(b$layout$panel_scales_x)
+  cols <- 2  # Where is this information stored? Now I have to handcode the number of columns.
+  rows <- L / cols
+  # Unify ranges of a single facet row
+  unify <- function(r2) {
+    left <- map_dbl(r2, function(x) x[[1]])  # Left ends of the ranges
+    right <- map_dbl(r2, function(x) x[[2]])  # Right ends of the ranges
+    u <- c(min(left), max(right))
+    u <- rep(list(u), length(left))  # Repeat the same range for each column
+    # Change this so that a list is returned
+    u
+  }
+  # Extract limits from each panel
+  L <- list()
+  for (i in seq(1, rows)) {
+    tmp <- b$layout$panel_scales_x
+    r <- tmp[seq((i-1)*cols + 1, i*cols)]
+    r2 <- map(r, function(x) x$range$range) # each item is numeric vector of length two
+    res <- unify(r2)
+    L <- append(L, res)
+  }
+  scales <- map(L, function(r) scale_x_continuous(limits = r))  # Turn list of ranges into a list of scales
+  scales
+}
+```
+
+```{r}
+all <- combined_data %>% 
+  select(-any_of(variables_to_drop)) %>%
+  mutate(#sex = fct_recode(gender, male="Men", female="Women"),
+         Status = factor(case_when(anemia ~ "case",
+                            TRUE        ~ "control")) ) #%>%
+  #select(sex, Status, age, hour)
+variables1 <- c(#"Hb_deferral", 
+                "smoking", #"warm_season",
+                "blood_donor",
+                "snp_1_169549811", "snp_6_32617727", "snp_15_45095352", "snp_17_58358769")
+variables2 <- c("age",      "weight",
+                #"Hb",  
+ #"days_to_previous_fb",                  "previous_Hb",        
+ #"year",                "hour",                "recent_donations",    "recent_deferrals",   
+"prs_anemia",        "prs_ferritin",        "prs_hemoglobin")
+g1 <- double_summary_plotter_case_control(all %>% select(c("Status", "sex"), all_of(variables1)), 
+                                          descript, geom="hollow_histogram", ncol=4) + 
+  theme_gray(base_size = 9) +
+  theme(legend.position="right",
+        legend.direction = "vertical",
+        strip.text.x = element_text(size = 6),
+        strip.text.y.right = element_text(angle = 0)
+        )
+g2 <- double_summary_plotter_case_control(all %>% select(c("Status", "sex"), all_of(variables2)), 
+                                          descript, geom="hollow_histogram", ncol=4) + 
+  theme_gray(base_size = 9) +
+  theme(legend.position="right",
+        legend.direction = "vertical",
+        strip.text.x = element_text(size = 6),
+        strip.text.y.right = element_text(angle = 0)
+        )
+scales1 <- unify_range_by_rows(g1)
+scales2 <- unify_range_by_rows(g2)
+gg1 <- g1 + ggh4x::facetted_pos_scales(scales1)
+gg2 <- g2 + ggh4x::facetted_pos_scales(scales2)
+if (save_figs) {
+  ggsave(paste(fig_path, "anemia_histogram_case_control1.pdf", sep="/"), gg1, width = 180, units="mm")
+  ggsave(paste(fig_path, "anemia_histogram_case_control2.pdf", sep="/"), gg2, width = 180, units="mm")
+}
+
+gg1
+gg2
+```
+
+
+
 ### Scale data
+
+
 
 ```{r Scale data}
 myscale <- function(v) { return((v - mean(v, na.rm = TRUE)) / sd(v, na.rm = TRUE))}
@@ -661,6 +808,31 @@ datas <- list(all=data, male = data_male, female = data_female,
               post_menopausal_female=data_post_menopausal_female)
 ```
 
+```{r Get normalizing constants for each variable}
+stat_helper <- function(df) {
+  df %>% summarise(across(where(is.numeric) & ! starts_with("snp_"), 
+                          list(mean=~mean(.x, na.rm=TRUE), 
+                               sd=~sd(.x, na.rm=TRUE))))
+}
+stat_helper2 <- function(df) { # long form version
+  df %>%
+    select(where(is.numeric) & ! starts_with("snp_")) %>% 
+    pivot_longer(cols=everything()) %>%
+    group_by(name) %>% 
+    summarise(mean=mean(value, na.rm=TRUE), sd=sd(value, na.rm=TRUE))
+}
+# For some reason this didn't work!
+# variable_stats <- map_dfr(
+#   list(stat_helper(last_donations %>% filter(group=="male")),
+#        stat_helper(last_donations %>% filter(group=="pre_menopausal_female"))),
+#   stat_helper)
+dfall <- stat_helper2(combined_data)
+dfm <- stat_helper2(combined_data %>% filter(group=="male"))
+dfpre <- stat_helper2(combined_data %>% filter(group=="pre_menopausal_female"))
+dfpost <- stat_helper2(combined_data %>% filter(group=="post_menopausal_female"))
+variable_stats <- bind_rows(all=dfall, male=dfm, pre_menopausal_female=dfpre, post_menopausal_female=dfpost, .id="group")
+rm(dfall, dfm, dfpre, dfpost)
+```
 
 # Logistic regression
 
@@ -1252,18 +1424,21 @@ get_bayes_intervals <- function(bayesian_fit) {
     select(Variable, low, Estimate, high)
   return(bayes_cis)
 }
-```
-
-```{r}
-filename <- sprintf("%s/anemia_bayes_cis.tsv", data_path)
-if (recompute | !file.exists(filename)) {
-  bayes_cis <- map_dfr(bayesian_fits_list, get_bayes_intervals, .id="Group") %>%
+pretty_bayes_intervals <- function(bayesian_fits_list) {
+  map_dfr(bayesian_fits_list, get_bayes_intervals, .id="Group") %>%
     left_join(descript2, by=c(Variable = "Variable2")) %>%
     mutate(Pretty = ifelse(is.na(Pretty), Variable, Pretty)) %>%
     filter(Variable != "(Intercept)") %>%
     mutate(Pretty = as.factor(Pretty)) %>%
     mutate(Group = factor(Group, levels=names(cohort_colors))) %>%
     mutate(across(c(Estimate, low, high), exp))
+}
+```
+
+```{r}
+filename <- sprintf("%s/anemia_bayes_cis.tsv", data_path)
+if (recompute | !file.exists(filename)) {
+  bayes_cis <- pretty_bayes_intervals(bayesian_fits_list)
   
   write_tsv(bayes_cis, file=filename)
 } else {
@@ -1301,6 +1476,190 @@ if (save_figs) {
 g
 ```
 
+
+
+
+
+
+## Try splines for some variables
+
+```{r Define formulas with splines}
+tmp <-as.character(bayes_formula)
+tmp2 <- sprintf("%s ~ %s", tmp[2], tmp[3]) # Formula converted to a string
+spline_variables <- c("age") #), "weight") # Make these variables use splines
+spline_formula_str <- str_replace_all(tmp2, paste(spline_variables, collapse="|"), "s(\\0)")
+# See here for combining interactions and splines:
+# https://stats.stackexchange.com/questions/403772/different-ways-of-modelling-interactions-between-continuous-and-categorical-pred?rq=1
+#spline_formula_str <- str_replace(spline_formula_str, fixed("blood_donor:s(weight)"), "s(weight, by=blood_donor, m=1)")
+spline_formula <- as.formula(spline_formula_str)
+print(spline_formula)
+```
+
+```{r}
+spline_datas <-list(#all=data, 
+             male=data_male, #female=data %>% filter(female),
+             pre_menopausal_female=data_pre_menopausal_female,
+             post_menopausal_female=data_post_menopausal_female)
+spline_formulas <- list(#all=spline_formula_all, 
+                          male=spline_formula, #female=spline_formula,
+             pre_menopausal_female=spline_formula,
+             post_menopausal_female=spline_formula)
+```
+
+
+### Fit models
+
+```{r Fit all Bayesian models}
+fit_bayesian_spline_helper <- function(group, data, formula) {
+  filename <- sprintf("%s/bayesian_spline_fit_%s.rds", data_path, group)
+  if (recompute | !file.exists(filename)) {
+    bayesian_fit <- brm(formula,
+                            data = data, # %>% slice_sample(n=40000),   # REMOVE ME!!!!!
+                            family = bernoulli(),
+                            file = NULL,
+                            control = list(max_treedepth = 15, adapt_delta = 0.99),
+                            #refresh = 0,
+                            cores = cores,
+                        chains = 4,
+                            #iter = 11000,
+                            iter = 2000,
+                            warmup = 500
+    )
+    saveRDS(bayesian_fit, filename)
+  } else {
+    bayesian_fit <- readRDS(filename)
+  }
+  return(tibble(group=group, fit=list(bayesian_fit)))
+}
+#summary(bayesian_fit_all)
+bayesian_spline_input <- tibble(group=setdiff(names(cohort_colors), c("all", "female")),
+                         data=spline_datas,
+                         formula=spline_formulas)
+spline_fits <- pmap_dfr(bayesian_spline_input, fit_bayesian_spline_helper)
+spline_fits_list <- deframe(spline_fits)
+```
+
+
+```{r Plot scaled splines}
+#plot(conditional_smooths(spline_fit, smooths = "s(age)"), ask = FALSE)
+helper <- function(fit) {
+  x <- conditional_smooths(fit)
+  bind_rows(
+    #pivot_longer(x[[1]], cols = days_to_previous_fb),
+    pivot_longer(x[[1]], cols = age)#,
+    #pivot_longer(x[[2]], cols = weight)
+  )
+}
+# Extract these from the fit for abline function.
+helper2 <- function(fit) {
+  t <- as_tibble(fit)
+  df <- tribble(
+    ~name, ~slope, ~intercept,
+    #"days_to_previous_fb", mean(t$b_days_to_previous_fb), mean(t$b_Intercept),
+    "age", mean(t$b_age), mean(t$b_Intercept)#,
+    #"weight", mean(t$b_weight), mean(t$b_Intercept)
+  )
+  return(df)
+}
+x <- map_dfr(spline_fits_list, helper, .id="group")
+
+plot_labeller <- function(group){
+    case_when(group == "pre_menopausal_female" ~ "pre",
+              group == "post_menopausal_female" ~ "post",
+              TRUE ~ group)
+}
+
+
+line_coeffs <- map_dfr(bayesian_fits_list, helper2, .id="group") %>%
+  filter(!group %in% c("all", "female")) %>%
+  mutate(intercept = 0)  # Don't use these after all for comparability with the splines
+g_scaled <- x %>% 
+  ggplot(aes(value, estimate__)) + 
+  geom_ribbon(mapping=aes(x=value, ymin=lower__, ymax=upper__), fill="lightgray") + 
+  geom_line(color="blue") + 
+  geom_abline(mapping=aes(intercept=intercept, slope=slope), data = line_coeffs) +
+  labs(title="Hb deferral, scaled", y="s(value)") +
+  #lims(y=c(-10, 5)) +
+  ggh4x::facet_grid2(rows=vars(group), cols=vars(name), scales = "free", independent = TRUE, 
+                     labeller = labeller(group=plot_labeller))
+if (save_figs) {
+  filename <- sprintf("%s/splines_scaled.png", fig_path)
+  ggsave(filename=filename, plot=g_scaled, width = 180,  height=180, units="mm", dpi=300, scale=1.0, device="png")
+}
+g_scaled
+```
+
+
+```{r Plot unscaled splines}
+g_unscaled <- x %>% inner_join(variable_stats, by=c("group", "name")) %>%
+  mutate(value = value * sd + mean) %>%
+  ggplot(aes(value, estimate__)) + 
+  geom_ribbon(mapping=aes(x=value, ymin=lower__, ymax=upper__), fill="lightgray") + 
+  geom_line(color="blue") + 
+  geom_abline(mapping=aes(intercept=intercept, slope=slope), 
+              data = line_coeffs %>% 
+                left_join(variable_stats, by=c("group", "name")) %>% 
+                mutate(intercept = -slope*mean/sd, slope = slope / sd)) +
+  labs(title="Hb deferral, unscaled", y="s(value)") +
+  ggh4x::facet_grid2(rows=vars(group), cols=vars(name), scales = "free", independent = TRUE,
+                     labeller = labeller(group=plot_labeller))
+if (save_figs) {
+  filename <- sprintf("%s/splines_unscaled.png", fig_path)
+  ggsave(filename=filename, plot=g_unscaled, width = 180,  height=180, units="mm", dpi=300, scale=1.0, device="png")
+}
+g_unscaled
+```
+
+### Effect sizes
+
+```{r}
+filename <- sprintf("%s/spline_cis.tsv", table_path)
+if (recompute | !file.exists(filename)) {
+  spline_cis <- pretty_bayes_intervals(spline_fits_list)
+  write_tsv(spline_cis, file=filename)
+} else {
+  spline_cis <- read_tsv(filename)
+}
+```
+
+```{r}
+spline_comparison_cis <- bind_rows(linear=bayes_cis, spline=spline_cis, .id="Dependency")
+g <- spline_comparison_cis %>%
+  filter(!(Pretty == "Smoking:Is blood donor" & Group == "post_menopausal_female")) %>%   # REMOVE THIS !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  filter(Group %in% c("male", "pre_menopausal_female", "post_menopausal_female")) %>%
+  mutate(across(c(Dependency, Pretty), fct_rev)) %>%
+  mutate(hollow_dependency=factor(if_else(low<=1 & high>=1, NA_character_, as.character(Dependency)),
+                             levels=levels(Dependency))) %>%
+  ggplot(aes(x=Estimate, xmin=low, xmax=high, y=Pretty, color=Dependency, fill=hollow_dependency)) + 
+  geom_vline(aes(xintercept=1), color="gray", size=1) +
+  geom_stripes(bayes_cis %>% filter(Variable != "femaleTRUE"), Pretty) +
+  ggstance::geom_linerangeh(position=position_dodge(width=1), size=0.2) + 
+  geom_point(#aes(), 
+             #fill=NA, 
+             shape=21,
+             size=1.5,
+             position=position_dodge(width=1)) +
+  labs(title = "Linear vs spline dependency", x="Odds ratio", y="Standardized variables") + 
+  #scale_colour_manual(values = cohort_colors) +
+  facet_wrap(~Group) +
+  scale_color_discrete(breaks = c("linear", "spline"), na.value = "NA") +
+  scale_fill_discrete(guide="none", na.value = "NA") +
+  # scale_colour_manual(values = cohort_colors[names(cohort_colors) != "all"],
+  #                     labels = cohort_names[names(cohort_names) != "all"], na.value = NA, drop=FALSE) +
+  guides(color = guide_legend(override.aes = list(shape = 16))) +
+  scale_x_log10() +
+  scale_y_discrete() + # !!!!! This is important. Solves the problem with position_dodge2 and the order of rect and pointrange geoms !!!!!!
+                         # Otherwise following error results: Error: Discrete value supplied to continuous scale
+  theme(legend.position="bottom",
+        legend.direction = "horizontal")
+if (save_figs) {
+  filename <- sprintf("%s/linear_vs_spline.png", fig_path)
+  ggsave(filename=filename, plot=g, width = 180,  height=180, units="mm", dpi=300, scale=1.0, device="png")
+}
+
+g
+```
+
 ## Combine confidence intervals from the two methods
 
 
@@ -1322,6 +1681,13 @@ g
 ```
 
 # Survival analysis
+
+```{r}
+cox_variables <- setdiff(variables, "age")
+cox_variables <- c(cox_variables, interactions)
+```
+
+
 
 ```{r Get the anemia events}
 
@@ -1410,18 +1776,38 @@ summary(sur3 %>% mutate(status = as.factor(status)))
 
 
 ```{r}
-old_n <- nrow(sur3)
-sur <- combined_data %>% select(-age) %>% inner_join(sur3, by="donor") %>%
+#old_n <- nrow(sur3)
+sur <- unfiltered_combined_data %>% select(-age) %>% # Remove the duplicate age column
+  full_join(sur3, by="donor") %>%
   mutate(across(where(is.logical), as.factor))
-cat(sprintf("Dropping %i/%i rows due to combining with combined_data\n", old_n - nrow(sur), old_n))
+#cat(sprintf("Dropping %i/%i rows due to combining with unfiltered_combined_data\n", old_n - nrow(sur), old_n))
+```
+
+```{r Drop missing values in survival}
+cox_model_variables <- c("status", "age", setdiff(cox_variables, interactions))
+cat(sprintf("Model variables are %s\n", paste(cox_model_variables, collapse=", ")))
+exclusions_anemia_cox <- sur %>% summarise(across({{cox_model_variables}}, ~ sum(is.na(.))))
+filename <- sprintf("%s/exclusions_anemia_cox.tsv", base)
+write_tsv(exclusions_anemia_cox, filename)
+t(exclusions_anemia_cox)
+old_n <- nrow(sur)
+sur <- sur %>% drop_na({{cox_model_variables}})
+cat(sprintf("Dropping %i/%i rows due to NA in model variables\n", old_n - nrow(sur), old_n))
 ```
 
 ```{r}
 sprintf("%i donors, %i events, %i censored", nrow(sur), sum(sur$status == 1), sum(sur$status == 0))
 ```
 
+```{r Drop non-adults survival}
+young_sur <- sur %>% filter(age < 18)
+sur <- sur %>% filter(age >= 18) # Drop children
+cat(sprintf("Dropped %i individuals because they were below 18 of age\n", nrow(young_sur)))
+```
 
-
+```{r}
+sprintf("%i donors, %i events, %i censored", nrow(sur), sum(sur$status == 1), sum(sur$status == 0))
+```
 
 ```{r}
 s <- survival::Surv(sur$age, sur$status)
@@ -1497,15 +1883,13 @@ ggsurvplot(survival::survfit(Surv(age, status) ~ snp_17_58358769,
 ## Cox regression
 
 ```{r Define formulas}
-cox_variables <- setdiff(variables, "age")
-cox_variables <- c(cox_variables, interactions)
 cox_formula <- as.formula(sprintf("Surv(age, status) ~ %s", paste(setdiff(cox_variables, "female"), collapse=" + ")))
 cox_formula_all <- as.formula(sprintf("Surv(age, status) ~ %s", paste(cox_variables, collapse=" + ")))
 print(cox_formula)
 print(cox_formula_all)
 ```
 
-
+### Fit models
 
 ```{r}
 #sur_female <- bind_rows(sur_pre_menopausal_female, sur_post_menopausal_female)
@@ -1518,7 +1902,8 @@ cox_fit_post_menopausal_female <- survival::coxph(cox_formula, data=scaled_sur_p
 cox_fit_list <- list(all=cox_fit_all, male=cox_fit_male, female=cox_fit_female,
                      pre_menopausal_female=cox_fit_pre_menopausal_female,
                      post_menopausal_female=cox_fit_post_menopausal_female)
-
+filename <- sprintf("%s/cox_fits.rds", data_path)
+saveRDS(cox_fit_list, filename)
 ```
 
 
@@ -1753,7 +2138,8 @@ if (save_figs) {
 g
 ```
 
-Results didn't change much, except for BMI and Smoking variables in group all
+Results didn't change much, except for BMI and Smoking variables in group all. Hence,
+we will use normal (non-stratified) Cox model, as it is simpler.
 
 
 
