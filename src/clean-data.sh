@@ -37,4 +37,4 @@ input2=$output
 $SRC/find_duplicates.R $input2.bim $DIRRESULT/duplicates_to_drop-chr$chromosome.txt
 $SRC/remove-duplicates.sh $input2 $output2 $DIRRESULT/duplicates_to_drop-chr$chromosome.txt
 
-
+rm ${output}.bed

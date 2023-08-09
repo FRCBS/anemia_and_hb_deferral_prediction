@@ -1,0 +1,131 @@
+---
+title: "Process for PRS catalog"
+author: "Jarkko Toivonen"
+date: "2023-01-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Process for PRS catalog
+
+```{r}
+n_max <- Inf
+#n_max <- 1000
+anemia_weights <- read_tsv("~/proj/blood_health_phewas/prs/D3_ANAEMIA_IRONDEF.weights.txt", 
+                           col_names = FALSE, n_max=n_max)
+ferritin_weights <- read_tsv("~/proj/blood_health_phewas/prs/IronhomeostasisFerritinAllInterval_IasterDX_2018-11-06.wInfo.cl.txt.weights.txt", 
+                             col_names = FALSE, n_max=n_max)
+hemoglobin_weights <- read_tsv("~/proj/blood_health_phewas/prs/32888494-GCST90002384-EFO_0004509.h.tsv.weights.txt", 
+                               col_names = FALSE, n_max=n_max)
+```
+
+```{r}
+mynames <- c("chr_name", "name", "chr_position", "effect_allele", "reference_allele", "effect_weight")
+colnames(anemia_weights) <- mynames
+colnames(ferritin_weights) <- mynames
+colnames(hemoglobin_weights) <- mynames
+# Each variant is reported four times, with the only difference in name
+anemia_weights <- anemia_weights %>% select(-name) %>% distinct() 
+ferritin_weights <- ferritin_weights %>% select(-name) %>% distinct() 
+hemoglobin_weights <- hemoglobin_weights %>% select(-name) %>% distinct() 
+```
+
+```{r}
+
+add_info <- function(df) {
+  df %>% mutate(rsID=NA,
+                locus_name=NA, weight_type="beta", allelefrequency_effect=NA, is_interaction=FALSE, is_recessive=FALSE, 
+                is_haplotype=FALSE, is_diplotype=FALSE, imputation_method=NA, 
+                variant_description=sprintf("FinnGen_VariantID=chr%i_%i_%s_%s", chr_name, chr_position, reference_allele, effect_allele), 
+                inclusion_critia=NA)
+}
+anemia_weights <- add_info(anemia_weights)
+ferritin_weights <- add_info(ferritin_weights)
+hemoglobin_weights <- add_info(hemoglobin_weights)
+```
+
+
+
+```{r}
+# Get rsids using Variant Effect Predictor.
+# The input parameter 'df' should have columns CHR, POS, ID, REF, ALT
+# The contents of ID are not really important.
+get_rsids <- function(df) {
+  # Create as input a VCF file for vep with following columns 
+  #CHROM  POS     ID      REF     ALT     QUAL    FILTER  INFO
+  input <- df %>% 
+    mutate(ID=".", QUAL=".", FILTER=".", INFO=".") %>%
+    select("#CHROM"="CHR", POS, ID, REF=REF, ALT=ALT, QUAL, FILTER, INFO)
+  input_filename <- tempfile("vep-input", fileext = ".vcf")
+  output_filename <- tempfile("vep-output", fileext = ".vcf")
+  write_tsv(input, file=input_filename)
+  print(input)
+  # Note! This will actually produce many rows per variant. These will be joined into one string at the end of this function.
+  # The --check-existing will return variants ids such as "rs881144,COSV60975501"
+  cmd <- sprintf("~/source/ensembl-vep/vep --vcf --check_existing -i %s -o %s -cache", input_filename, output_filename)
+  print(cmd)
+  return_value <- system(cmd)
+  if (return_value != 0)
+    stop("Failed to run vep")
+  result <- read_tsv(output_filename, comment="##")
+  remove_temp_files <- FALSE
+  if (remove_temp_files) {
+    unlink(input_filename)
+    unlink(output_filename)
+    unlink(paste0(output_filename, "_summary.html"))
+  }
+  
+  result <- result %>% select("CHR"="#CHROM", POS, INFO)
+  names <- rep(NA, 18)
+  names[18] <- "rsid"
+  result <- result %>% 
+    separate(INFO, into=names, remove=FALSE, sep="\\|") %>% 
+    mutate(rsid=str_extract(rsid, "rs[0-9]+")) %>%
+    rename(Annotation=INFO)
+  return(result)
+}
+```
+
+```{r eval=FALSE}
+df2 <- df %>% select(
+  CHR=chr_name, POS=chr_position, ID=name, REF=reference_allele, ALT=effect_allele
+)
+
+```
+
+```{r eval=FALSE}
+res <- get_rsids(df2)
+```
+
+```{r}
+names_in_order <- c("rsID", "chr_name", "chr_position", "effect_allele", "reference_allele",  "effect_weight", "locus_name", "weight_type", "allelefrequency_effect",  "is_interaction", "is_recessive", "is_haplotype", "is_diplotype",  "imputation_method", "variant_description", "inclusion_critia")
+anemia_weights <- anemia_weights %>% select(names_in_order)
+ferritin_weights <- ferritin_weights %>% select(names_in_order)
+hemoglobin_weights <- hemoglobin_weights %>% select(names_in_order)
+```
+
+```{r}
+base <- "~/FRCBS/blood_health_phewas/prs_catalog"
+write_tsv(anemia_weights, file=sprintf("%s/prscs_IDA.tsv.gz", base))
+write_tsv(ferritin_weights, file=sprintf("%s/prscs_ferritin.tsv.gz", base))
+write_tsv(hemoglobin_weights, file=sprintf("%s/prscs_hemoglobin.tsv.gz", base))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

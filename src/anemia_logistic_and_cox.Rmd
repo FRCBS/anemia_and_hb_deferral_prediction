@@ -7,12 +7,12 @@ output:
     toc: yes
     toc_depth: 4
     toc_float: yes
-  md_document:
-    toc: yes
-    toc_depth: 3
-  pdf_document:
-    toc: yes
-    toc_depth: '3'
+#  md_document:
+#    toc: yes
+#    toc_depth: 3
+  # pdf_document:
+  #   toc: yes
+  #   toc_depth: 4
 ---
 
 ```{r setup, include=FALSE}
@@ -23,6 +23,7 @@ library(GGally)
 library(detectseparation)  # This is better than the above package
 library(brms)
 library(furrr)
+library(broom)
 library(tidybayes)
 library(bayesplot)
 library(survival)
@@ -32,14 +33,16 @@ library(ggridges)
 library(ggstance)
 library(knitr)
 library(kableExtra)
+library(patchwork)
 #library(tictoc)
 allow_individual_level_data <- TRUE
 recompute_dosages <- FALSE
 recompute_survival <- FALSE
 recompute <- FALSE
 save_figs <- FALSE
+save_tables <- FALSE
 #base <- "~/FRCBS/blood_health_phewas/logistic_regression"
-base <- "/finngen/red/toivoja/anemia-gwas/logistic_regression"
+base <- "/home/ivm/anemia-gwas/logistic_regression"
 fig_path <- sprintf("%s/figures", base)
 data_path <- sprintf("%s/data", base)
 table_path <- sprintf("%s/tables", base)
@@ -77,17 +80,25 @@ variables <- c("female", "age", #"year",
              "blood_donor", 
              #"prs_anemia",
              "prs_ferritin","prs_hemoglobin",
-             "snp_17_58358769", "snp_6_32617727", "snp_15_45095352", "snp_1_169549811")
+             "snp_17_58358769", 
+             "snp_6_32617727", "snp_15_45095352", "snp_1_169549811")
 interactions <- c("blood_donor:weight", "blood_donor:smoking")
-#interactions <- ""
+snip_variables <- c("snp_1_169549811", "snp_6_32617727", "snp_15_45095352", "snp_17_58358769")
+
+#interactions <- c()
 ```
 
 ```{r}
 
 #cohort_order <- c("all", "male", "pre_menopausal_female", "post_menopausal_female")
 
-to_pretty <- function(d, v) {
-  d %>% filter(Variable==v) %>% pull(Pretty)
+# Convert variable name in v to prettier versions
+to_pretty_vector <- function(v, d) {
+  tibble(Variable=v) %>% left_join(descript, by="Variable") %>% mutate(Pretty = if_else(is.na(Pretty), Variable, Pretty)) %>%
+    pull(Pretty)
+  # The below solution won't work if an element of v isn't found in the table d. In this case
+  # I would like to leave the element unmodified
+  #d %>% filter(Variable %in% v) %>% mutate(Variable = factor(Variable, levels=v)) %>% arrange(Variable) %>% pull(Pretty)
 }
 
 to_encoded <- function(d, v) {
@@ -102,8 +113,8 @@ add_interaction_descriptions <- function(d, interactions, encoded=FALSE) {
     ab <- str_split_fixed(int, ":", n=2)[1,]
     a <- ab[1]
     b <- ab[2]
-    ap <- to_pretty(d, a)
-    bp <- to_pretty(d, b)
+    ap <- to_pretty_vector(a, d)
+    bp <- to_pretty_vector(b, d)
     if (encoded) {
       a <- to_encoded(d, a)
       b <- to_encoded(d, b)
@@ -238,10 +249,31 @@ if (TRUE) {
 knitr::kable(snips) %>% kable_styling()
 ```
 
+
+The allele frequencies of UKBB are not available for R6. Check them from R8 or R9.
+
+```{r}
+helper <- function(filename) {
+  cmd <- sprintf("zcat %s | 
+  awk 'NR==1{print};{if ($1==1 && $2 == 169549811 || $1 == 6 && $2 == 32617727 || $1 == 15 && $2 == 45095352 || $1 == 17 && $2 == 58358769) print}'", filename)
+  #print(cmd)
+  result <- system(cmd, intern = TRUE)
+  read_tsv(I(result))
+}
+vars <- c("#CHR", "POS", "REF", "ALT", "FINNGEN_beta", "FINNGEN_sebeta",  "FINNGEN_pval", "FINNGEN_af_alt", "UKBB_beta", "UKBB_sebeta", "UKBB_pval", "UKBB_af_alt", "rsid")
+meta_r8 <- helper("/finngen/library-green/finngen_R8/finngen_R8_analysis_data/ukbb_meta/meta/D3_ANAEMIA_IRONDEF_meta_out.tsv.gz")
+meta_r9 <- helper("/finngen/library-green/finngen_R9/finngen_R9_analysis_data/ukbb_meta/meta/D3_ANAEMIA_IRONDEF_meta_out.tsv.gz")
+meta <- bind_rows(r8=meta_r8, r9=meta_r9, .id="Release")
+meta %>% select(all_of(vars), Release)
+meta_r8 %>% select(all_of(vars))
+meta_r9 %>% select(all_of(vars))
+```
+
+
 ```{r Create dosages}
 get_snip <- function(chr, pos) {
   cat(sprintf("Chromosome %i pos %i", chr, pos))
-  dir <- "/home/toivoja/data/private/finngen"
+  #dir <- "/home/toivoja/data/private/finngen"
   #filename <- sprintf("%s/finngen_R4_bb_chr%i_BLOOD_SERVICE_extracted_*_donor.vcf.gz", dir, chr) # R4
   #filename <- Sys.glob(filename)  # Expand the wildcard '*'
   #filename <- sprintf("%s/R5/BB_finngen_R7_chr%i_BLOOD_SERVICE_BB_extracted_consentdonors.vcf.gz", dir, chr) # R5
@@ -314,7 +346,7 @@ g
 ```{r Get PRS scores, results='hide', message=FALSE}
 get_scores <- function(phenotype) { 
   #filenames <- sprintf("~/proj/blood_health_phewas/prs/R4_chr%i.profile", 1:22)
-  filenames <- sprintf("/finngen/red/toivoja/prs/%s/R6_%s_%i.profile", phenotype, phenotype, 1:22)
+  filenames <- sprintf("/finngen/red/toivoja/prs/%s_scores/R6_%s_%i.profile", phenotype, phenotype, 1:22)
   names(filenames) <- sprintf("chr%i", 1:22)
   df <- map_dfr(filenames, 
                 function(filename) {
@@ -337,6 +369,24 @@ if (recompute | !file.exists(filename)) {
 
 ```
 
+```{r}
+check_normality <- function(scores, variable, pretty) {
+  g1 <- scores %>% 
+    ggplot(aes(x=.data[[variable]])) + 
+    geom_histogram() + 
+    labs(x=pretty)
+  g1
+  g2 <- ggqqplot(scores[[variable]]) + labs(y=pretty)
+  set.seed(42)
+  # Null hypothesis is that the sample is normally distributed
+  s <- shapiro.test(sample(scores[[variable]], 5000)) # For some reason the sample size must be between 3 and 5000
+  g1+g2 + plot_annotation(title=sprintf("Shapiro-Wilk p-value: %f", s$p.value))
+}
+check_normality(scores, "prs_anemia", "PRS anemia")
+check_normality(scores, "prs_ferritin", "PRS ferritin")
+check_normality(scores, "prs_hemoglobin", "PRS hemoglobin")
+```
+
 ```{r Example plot of PRS bottom and top deciles, eval=FALSE}
 # This is for presentation
 g <- scores %>% 
@@ -353,6 +403,8 @@ g
 
 
 ### Get Finngen
+
+#### Anemia event
 
 ```{r Get endpoint age}
 # D3_ANAEMIA_IRONDEF
@@ -375,10 +427,11 @@ if (!file.exists(anemia_endpoint_filename)) {
 anemia_endpoint <- read_tsv(anemia_endpoint_filename)
 ```
 
+
 ```{r Load FinnGen data}
 
 get_finngen <-function() {
-  fg <- read_tsv("/finngen/red/toivoja/anemia-gwas/logistic_regression/data/pheno-covar.txt")
+  fg <- read_tsv(sprintf("%s/data/pheno-covar.txt", base))
   fg <- fg %>% select(donor=FINNGENID, height=HEIGHT, weight=WEIGHT, sex=SEX, smoking=SMOKE2,
                       bmi=BMI, anemia=D3_ANAEMIA_IRONDEF, AGE_AT_DEATH_OR_NOW)
   return(fg)
@@ -395,9 +448,11 @@ joined %>% mutate(diff=D3_ANAEMIA_IRONDEF_AGE-AGE_AT_DEATH_OR_NOW,
   geom_freqpoly() +
   scale_y_log10()
 
+# Starting from R7 the variable is called AGE_AT_DEATH_OR_END_OF_FOLLOWUP instead of
+# AGE_AT_DEATH_OR_NOW
 finngen <- joined %>% 
   mutate(age = ifelse(anemia==1, D3_ANAEMIA_IRONDEF_AGE, AGE_AT_DEATH_OR_NOW)) %>%
-  select(!starts_with("D3_ANAEMIA_IRONDEF") & ! any_of("AGE_AT_DEATH_OR_NOW"))
+  select(!any_of(c("D3_ANAEMIA_IRONDEF", "D3_ANAEMIA_IRONDEF_NEVT")) & ! any_of("AGE_AT_DEATH_OR_NOW"))
 
 #old_n <- nrow(finngen)
 finngen <- finngen %>% 
@@ -420,7 +475,7 @@ finngen <- finngen %>%
 
 
 ```{r Get blood donor ids}
-donations <- read_csv("/finngen/red/toivoja/anemia-gwas/saige/DF1-6_VPU_no_dups.txt",
+donations <- read_csv(sprintf("%s/../saige/DF1-6_VPU_no_dups.txt", base),
                       col_names = "donor")
 donations$blood_donor <- TRUE
 ```
@@ -510,19 +565,33 @@ check_anemia <- function(data) {
     filter(anemia)
   cat(sprintf("Anemia among blood donors %.4f%%\n", tf %>% filter(blood_donor) %>% pull(freq)))
   cat(sprintf("Anemia among non blood donors %.4f%%\n", tf %>% filter(!blood_donor) %>% pull(freq)))
+  cat(sprintf("Anemia among all FinnGen participants %.4f%%\n", mean(data$anemia, na.rm=TRUE)*100))
 }
 check_anemia(unfiltered_combined_data)
 ```
 
 ```{r Drop missing values}
 model_variables <- c("anemia", variables)
+variables_to_drop <- c("nb_donat_progesa", "nb_donat_outside", "donation_count",   "first_event", "female",
+                       "consecutive_deferrals", "Hb_first", "previous_Hb_def", "height", 
+                       "bmi"
+                       #"weight"
+                       )
 cat(sprintf("Model variables are %s\n", paste(model_variables, collapse=", ")))
-exclusions_anemia_logistic <- unfiltered_combined_data %>% summarise(across({{model_variables}}, ~ sum(is.na(.))))
-filename <- sprintf("%s/exclusions_anemia_logistic.tsv", base)
-write_tsv(exclusions_anemia_logistic, filename)
+# Set NA as age of under 18 individuals
+exclusions_anemia_logistic <- unfiltered_combined_data %>% 
+  mutate(age = if_else(age < 18, NA_real_, age)) %>%
+  summarise(across({{model_variables}}, ~ sum(is.na(.))))
+filename <- sprintf("%s/exclusions_anemia_logistic.tsv", table_path)
+if (save_tables) {
+  write_tsv(exclusions_anemia_logistic, filename)
+}
 t(exclusions_anemia_logistic)
+
 old_n <- nrow(unfiltered_combined_data)
-combined_data <- unfiltered_combined_data %>% drop_na({{model_variables}})
+combined_data <- unfiltered_combined_data %>% 
+  mutate(age = if_else(age < 18, NA_real_, age)) %>%
+  drop_na({{model_variables}})
 cat(sprintf("Dropping %i/%i rows due to NA in model variables\n", old_n - nrow(combined_data), old_n))
 ```
 
@@ -531,16 +600,82 @@ cat(sprintf("Dropping %i/%i rows due to NA in model variables\n", old_n - nrow(c
 check_anemia(combined_data)
 ```
 
-```{r Drop non-adults}
-young_combined_data <- combined_data %>% filter(age < 18)
-combined_data <- combined_data %>% filter(age >= 18) # Drop children
-cat(sprintf("Dropped %i individuals because they were below 18 of age\n", nrow(young_combined_data)))
+```{r}
+combined_data %>% 
+  group_by(blood_donor, group) %>% 
+  summarise(anemia = mean(anemia), .groups="drop") %>%
+  pivot_wider(names_from = group, values_from=anemia)
+```
+
+The prevalence of IDA is highest in the group of premenopausal females.
+
+Absolute IDA counts:
+
+```{r}
+combined_data %>% 
+  group_by(blood_donor, group) %>% 
+  summarise(anemia = sum(anemia), .groups="drop") %>%
+  pivot_wider(names_from = group, values_from=anemia)
 ```
 
 ```{r}
-check_anemia(combined_data)
+combined_data %>% filter(anemia) %>% count(blood_donor)
 ```
 
+Better combined table:
+
+```{r}
+blood_donor_options <- c("both", "yes", "no")
+group_options <- c("all", "male", "pre_menopausal_female", "post_menopausal_female")
+helper <- function(df, group_opt, blood_donor_opt) {
+  stopifnot( blood_donor_opt %in% blood_donor_options)
+  stopifnot( group_opt %in% group_options)
+  if (blood_donor_opt == "yes")
+    df <- df %>% filter(blood_donor)
+  else if ( blood_donor_opt == "no")
+    df <- df %>% filter(!blood_donor)
+  if (group_opt != "all")
+    df <- df %>% filter(group==group_opt)
+  n <- nrow(df)
+  cases <- sum(df$anemia)
+  controls <- n - cases
+  prevalence <- 100 * cases / n
+  tibble(group=group_opt, blood_donor=blood_donor_opt, 
+         n=n, cases=cases, controls=controls, `prevalence (%)`=prevalence)
+}
+#helper(combined_data, blood_donor="both", group="all")
+anemia_stats <- expand_grid(group=group_options, blood_donor=blood_donor_options)
+anemia_stats <- anemia_stats %>% pmap_dfr(function(group, blood_donor) helper(combined_data, group, blood_donor))
+print(anemia_stats, n=Inf)
+filename <- sprintf("%s/anemia_stats.tsv", table_path)
+write_tsv(anemia_stats, filename)
+```
+
+
+```{r Count non-adults}
+young_combined_data <- unfiltered_combined_data %>% filter(age < 18)
+cat(sprintf("%i individuals had age below 18 of age\n", nrow(young_combined_data)))
+```
+
+```{r}
+#check_anemia(combined_data)
+```
+
+```{r}
+g <- combined_data %>% 
+  filter(anemia) %>%
+  select(D3_ANAEMIA_IRONDEF_AGE, D3_ANAEMIA_IRONDEF_YEAR) %>%
+  pivot_longer(cols=everything()) %>%
+  ggplot(aes(value)) +
+  geom_histogram(bins = 25) +
+  facet_wrap(~ name, scales = "free") +
+  labs(title="Occurred IDA events")
+g
+if (save_figs) {
+  filename <- sprintf("%s/occurred_ida_events.png", fig_path)
+  ggsave(filename=filename, g, width = 180,  height = 120, units="mm", dpi=300, scale=1.0, device="png")
+}
+```
 
 ```{r Summary of all donors}
 summary(combined_data %>% mutate(across(starts_with("snp_"), as.factor)))
@@ -587,11 +722,13 @@ for (g in c("male", "pre_menopausal_female", "post_menopausal_female")) {
 
 ### Histograms of variables
 
+#### Histograms
+
 ```{r}
 # Converts column names of a dataframe 'df' to pretty format using dataframe 'description'.
 to_pretty <- function(df, description) {
   old_names <- colnames(df)
-  conversion <- description %>% filter(Variable %in% all_of(old_names)) %>% select(Pretty, Variable) %>% deframe()
+  conversion <- description %>% filter(Variable %in% old_names) %>% select(Pretty, Variable) %>% deframe()
   #print(conversion)
     #message(sprintf("descript names: %s\n", paste(description$Variable, collapse=" ")))
   #message(sprintf("old_names: %s\n", paste(old_names, collapse=" ")))
@@ -633,7 +770,7 @@ double_summary_plotter <- function(male_df, female_df, variable_descriptions, ge
     g <- df %>%
       ggplot(aes(value, color=Sex)) +
       facet_wrap(~ name, scales = "free", ncol=ncol) +
-      geom_histogram(fill=NA) +
+      geom_histogram(fill=NA, position="stack") +
       scale_x_continuous(breaks=breaks)
   } else {
     stop(sprintf("Unknow value for the geom parameter: %s", geom))
@@ -649,11 +786,6 @@ double_summary_plotter <- function(male_df, female_df, variable_descriptions, ge
 #source("~/FRCBS/Hb_predictor_container/src/common.R")
 #base <- "~/FRCBS/blood_health_phewas/logistic_regression/"
 #last_donations <- readRDS(sprintf("%s/last_donations.rds", base))
-variables_to_drop <- c("nb_donat_progesa", "nb_donat_outside", "donation_count",   "first_event", "female",
-                       "consecutive_deferrals", "Hb_first", "previous_Hb_def", "height", 
-                       "bmi"
-                       #"weight"
-                       )
 male <- combined_data %>% filter(!female) %>% select(-any_of(variables_to_drop))
 female <- combined_data %>% filter(female) %>% select(-any_of(variables_to_drop))
 g <- double_summary_plotter(male, female, descript, geom="hollow_histogram", ncol=4) + 
@@ -661,7 +793,8 @@ g <- double_summary_plotter(male, female, descript, geom="hollow_histogram", nco
   theme(legend.position="bottom",
         strip.text.x = element_text(size = 6)
         )
-ggsave(paste(fig_path, "anemia_histogram.pdf", sep="/"), g, width = 180, units="mm")
+if (save_figs)
+  ggsave(paste(fig_path, "anemia_histogram.pdf", sep="/"), g, width = 180, units="mm")
 g
 ```
 
@@ -690,9 +823,10 @@ double_summary_plotter_case_control <- function(df, variable_descriptions, geom 
       scale_x_continuous(breaks=breaks)
   } else if (geom=="histogram") {
     g <- df %>%
-      ggplot(aes(value, fill=Status)) +
-      facet_wrap(~ name, scales = "free", ncol=ncol) +
-      geom_histogram(position="dodge") +
+      ggplot(aes(value, fill=Sex)) +
+      ggh4x::facet_grid2(rows=vars(name), cols=vars(Status), scales = "free", independent = TRUE) + 
+      #facet_wrap(~ name, scales = "free", ncol=ncol) +
+      geom_histogram(position="identity", alpha=0.8) +
       scale_x_continuous(breaks=breaks)
   } else if (geom=="hollow_histogram") {
     g <- df %>%
@@ -701,6 +835,15 @@ double_summary_plotter_case_control <- function(df, variable_descriptions, geom 
       ggh4x::facet_grid2(rows=vars(name), cols=vars(Status), scales = "free", independent = TRUE) + 
       geom_histogram(fill=NA) +
       scale_x_continuous(breaks=breaks)
+  } else if (geom=="bar") {
+    g <- df %>%
+      mutate(value = factor(value, levels=0:2),
+             name = fct_relevel(name, function(v) str_sort(v, numeric=TRUE))) %>%
+      ggplot(aes(value, fill=Sex)) +
+      #facet_grid(name ~ Status, scales = "free") +
+      ggh4x::facet_grid2(rows=vars(name), cols=vars(Status), scales = "free", independent = TRUE) + 
+      geom_bar(position="dodge", width=0.5)# +
+      #scale_x_discrete(breaks=breaks)
   } else {
     stop(sprintf("Unknow value for the geom parameter: %s", geom))
   }
@@ -711,7 +854,7 @@ double_summary_plotter_case_control <- function(df, variable_descriptions, geom 
 ```
 
 ```{r}
-# Function to to unify x axis ranges on each row.
+# Function to to unify x axis ranges on each row of the facetted plot.
 # Returns a list of scales that can be passed as a parameter to the ggh4x::facetted_pos_scales function,
 # to modify individual panels in a facetted plot
 unify_range_by_rows <- function(g) {
@@ -749,35 +892,46 @@ all <- combined_data %>%
          Status = factor(case_when(anemia ~ "case",
                             TRUE        ~ "control")) ) #%>%
   #select(sex, Status, age, hour)
-variables1 <- c(#"Hb_deferral", 
+categorical_variables <- c(#"Hb_deferral", 
                 "smoking", #"warm_season",
                 "blood_donor",
-                "snp_1_169549811", "snp_6_32617727", "snp_15_45095352", "snp_17_58358769")
-variables2 <- c("age",      "weight",
+                "snp_1_169549811", "snp_6_32617727", "snp_15_45095352", "snp_17_58358769",
+                "Status", "sex")
+continuous_variables <- c("age",      "weight",
                 #"Hb",  
  #"days_to_previous_fb",                  "previous_Hb",        
  #"year",                "hour",                "recent_donations",    "recent_deferrals",   
-"prs_anemia",        "prs_ferritin",        "prs_hemoglobin")
-g1 <- double_summary_plotter_case_control(all %>% select(c("Status", "sex"), all_of(variables1)), 
-                                          descript, geom="hollow_histogram", ncol=4) + 
+#"prs_anemia",        
+"prs_ferritin",        "prs_hemoglobin")
+all_variables <- c(categorical_variables, continuous_variables)
+```
+
+
+```{r}
+g1 <- double_summary_plotter_case_control(all %>% select(c("Status", "sex"), all_of(categorical_variables)), 
+                                          descript, geom="bar", ncol=4) + 
   theme_gray(base_size = 9) +
   theme(legend.position="right",
         legend.direction = "vertical",
         strip.text.x = element_text(size = 6),
         strip.text.y.right = element_text(angle = 0)
         )
-g2 <- double_summary_plotter_case_control(all %>% select(c("Status", "sex"), all_of(variables2)), 
-                                          descript, geom="hollow_histogram", ncol=4) + 
+g2 <- double_summary_plotter_case_control(all %>% select(c("Status", "sex"), all_of(continuous_variables)), 
+                                          descript, geom="histogram", ncol=4) + 
   theme_gray(base_size = 9) +
   theme(legend.position="right",
         legend.direction = "vertical",
         strip.text.x = element_text(size = 6),
         strip.text.y.right = element_text(angle = 0)
         )
-scales1 <- unify_range_by_rows(g1)
+# Unifying the scales is simpler for discrete variables
+#scales1 <- unify_range_by_rows(g1)
+#gg1 <- g1 + ggh4x::facetted_pos_scales(scales1)
+gg1 <- g1 + scale_x_discrete(limits=factor(0:2))
+
 scales2 <- unify_range_by_rows(g2)
-gg1 <- g1 + ggh4x::facetted_pos_scales(scales1)
 gg2 <- g2 + ggh4x::facetted_pos_scales(scales2)
+
 if (save_figs) {
   ggsave(paste(fig_path, "anemia_histogram_case_control1.pdf", sep="/"), gg1, width = 180, units="mm")
   ggsave(paste(fig_path, "anemia_histogram_case_control2.pdf", sep="/"), gg2, width = 180, units="mm")
@@ -788,6 +942,199 @@ gg2
 ```
 
 
+Avoid bins with count smaller that 5, by uniting smaller adjacent bins. The result
+will be a variable width histogram.
+
+```{r}
+mybreaks <- function(x, number_of_breaks) 
+{
+  if (!is.numeric(x)) 
+    stop("'x' must be numeric")
+  if (length(number_of_breaks) != 1L)
+    stop("Length of breaks must be one")
+  if (is.na(number_of_breaks) || number_of_breaks < 2L) 
+     stop("invalid number of intervals")
+  nb <- as.integer(number_of_breaks + 1)
+  dx <- diff(rx <- range(x, na.rm = TRUE))
+  if (dx == 0) {
+    dx <- if (rx[1L] != 0) 
+      abs(rx[1L])
+    else 1
+    breaks <- seq.int(rx[1L] - dx/1000, rx[2L] + dx/1000, 
+                      length.out = nb)
+  }
+  else {
+    breaks <- seq.int(rx[1L], rx[2L], length.out = nb)
+    breaks[c(1L, nb)] <- c(rx[1L] - dx/1000, rx[2L] + 
+                             dx/1000)
+  }
+  breaks
+}
+mycut <- function(x, number_of_breaks=30) {
+  breaks <- mybreaks(x, number_of_breaks)
+  #x <- cut(x, breaks=breaks)
+  df <- cut(x, breaks = breaks) %>% 
+    table() %>% as_tibble() %>% rename(bin=".") %>% 
+    mutate(low = breaks[1:number_of_breaks], high = breaks[2:(number_of_breaks+1)])
+  df
+}
+```
+
+```{r}
+unite_small_bins <- function(df, limit=5) {
+  i <- which.min(df$n)  # Unite the smallest bin
+  #print(i)
+  while (df[[i, "n"]] < limit) {
+    #cat(sprintf("i=%i, class(i)=%s\n", i, class(i)))
+    n <- nrow(df)
+    i2 <-               # with this neighbouring bin
+      if (i==1) 2 else {
+        if (i==n) n-1 else {
+          if (df[[i-1, "n"]] < df[[i+1, "n"]]) { 
+            i-1 
+          } else {
+            i+1
+          }
+        }
+      }
+    first <- min(i, i2)
+    second <- max(i, i2)
+    cat(sprintf("Combining rows %i and %i from a tibble with %i rows\n", first, second, n))
+    df[[first, "n"]] <- df[[first, "n"]] + df[[second, "n"]] 
+    df[[first, "high"]] <- df[[second, "high"]] 
+    df <- df[-second,]
+    i <- which.min(df$n)  # Unite the smallest bin
+    #print(i)
+    #df <- unite_small_bins(df, limit)
+  }
+  return(df)
+}
+```
+
+```{r eval=FALSE}
+# Test the variable width historam with a single variable
+df <- mycut(all$weight, 30)
+df <- unite_small_bins(df)
+g <- df %>% ggplot(aes(xmin=low, xmax=high, ymin=0, ymax=n)) + geom_rect()
+g
+```
+
+```{r}
+helper <- function(data, key) {
+  cat(sprintf("Got dataframe with %i rows and %i columns\n", nrow(data), ncol(data)))
+  df <- mycut(data$value, 30)
+  df <- unite_small_bins(df)
+  df
+}
+df <- all %>% 
+  select(c("Status", "sex"), all_of(continuous_variables)) %>% 
+  pivot_longer(cols=-c(Status, sex)) %>% 
+  group_by(Status, sex, name)
+df2 <- df %>% group_modify(helper)
+```
+
+Try to reproduce the above continuous variable histogram using geom_rect.
+
+```{r}
+g <- df2 %>% 
+  mutate(name = to_pretty_vector(name, descript)) %>%
+  ggplot(aes(xmin=low, xmax=high, ymin=0, ymax=n, fill=sex)) +
+  geom_rect(alpha=0.8) + 
+  labs(x="value", y="count", fill="Sex") +
+  ggh4x::facet_grid2(name ~ Status, scales="free", independent = TRUE)
+#facet_grid(name ~ Status, scales="free")
+scales2 <- unify_range_by_rows(g2)
+g2 <- g + ggh4x::facetted_pos_scales(scales2)
+
+if (save_figs) {
+  filename <- paste(fig_path, "anemia_histogram_case_control2_var_width.pdf", sep="/")
+  ggsave(filename, g2, width = 180, units="mm")
+}
+g2
+# Check that bin sizes (column ymax) are at least five.
+g2_data <- layer_data(g2) %>% as_tibble() %>% arrange(ymax)
+if (save_tables) {
+  filename <- paste(table_path, "anemia_histogram_case_control2_var_width.tsv", sep="/")
+  write_tsv(g2_data, filename)
+}
+```
+
+```{r eval=FALSE}
+# a test using the data extracted from a ggplot object
+df <- layer_data(gg2) %>% as_tibble() %>% 
+  rename(panel=PANEL) %>%
+  mutate(group = as.factor(group))
+df %>% ggplot(aes(#x=x, y=y, 
+                  xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax, fill=group)) +
+  geom_rect(alpha=0.8) + facet_wrap(~ panel, scales="free")
+```
+
+#### Table one
+
+```{r}
+x <- tableone::CreateTableOne(data=all %>% drop_na(-D3_ANAEMIA_IRONDEF_YEAR), vars = all_variables, factorVars = categorical_variables,
+                    #argsExact = list(workspace = 10^9), # Even this wasn't large enough when stratifying by both sex and status
+               strata = c("Status", "sex"), 
+               addOverall = TRUE
+               )
+print(x, 
+      showAllLevels = TRUE,
+      nonnormal = setdiff(continuous_variables, c("prs_anemia", "prs_ferritin", "prs_hemoglobin"))) # Because the distributions are skewed
+      #exact = setdiff(categorical_variables, c("warm_season", "smoking", "Status", "sex"))
+m <- print(x,
+           showAllLevels = TRUE,
+           nonnormal = setdiff(continuous_variables, c("prs_anemia", "prs_ferritin", "prs_hemoglobin")), # Because the distributions are skewed
+           printToggle = FALSE, noSpaces = TRUE           
+) %>% as_tibble(rownames="Variable")
+if (save_tables) {
+  filename <- paste(table_path, "anemia_tableone.tsv", sep="/")
+  write_tsv(m, filename)
+}
+```
+
+#### Genotype distributions 
+
+```{r, results='asis'}
+tmp <- map_dfr(snip_variables, 
+              function(snp) { 
+                as_tibble(table(
+              combined_data %>% 
+                    select(all_of(snp), anemia)
+                )) %>% 
+                  pivot_longer(cols=all_of(snp))
+              }
+  )
+genotype_distribution <- tmp %>% 
+  pivot_wider(names_from = anemia, values_from = n) %>%
+  rename(case=`TRUE`, control=`FALSE`) %>% 
+  group_by(name) %>% 
+  mutate(case_freq = case / sum(case),
+         control_freq = control / sum(control)) %>%
+  ungroup() %>%
+  mutate(value = as.integer(value)) %>%
+  rename(variable=name, dosage=value)
+filename <- sprintf("%s/anemia_genotype_distribution.tsv", table_path)
+if (save_tables) {
+  write_tsv(genotype_distribution, filename)
+}
+kable(genotype_distribution, format="html", digits=2)
+#genotype_distribution
+```
+
+```{r}
+g <- genotype_distribution %>% 
+  pivot_longer(cols=c(case_freq, control_freq), values_to = "frequency", names_to = "status") %>% 
+  mutate(status = str_replace(status, "_freq", ""),
+         variable = factor(variable, snip_variables)) %>%
+  ggplot(aes(x=dosage, y=frequency, fill=status)) +
+  geom_col(position="dodge") +
+  facet_grid(~variable)
+g
+if (save_figs) {
+   filename <- sprintf("%s/anemia_genotype_distributions.png", fig_path)
+   ggsave(filename=filename,  width = 90,  height=90, units="mm", dpi=300, scale=1.0, device="png")
+}
+```
 
 ### Scale data
 
@@ -806,6 +1153,17 @@ data_post_menopausal_female <- combined_data %>% filter(group == "post_menopausa
 datas <- list(all=data, male = data_male, female = data_female,
               pre_menopausal_female=data_pre_menopausal_female,
               post_menopausal_female=data_post_menopausal_female)
+
+# Drop non-blood donors
+#datas <- map(datas, function(df) df %>% filter(blood_donor==TRUE))
+
+# Perform rank-based inverse normal transform on the PRS variables
+inv_transform <- function(df) {
+  df <- df %>%
+    mutate(across(c("prs_anemia", "prs_ferritin", "prs_hemoglobin"), RNOmni::RankNorm, k=0.5))
+  df
+}
+#datas <- map(datas, inv_transform)
 ```
 
 ```{r Get normalizing constants for each variable}
@@ -891,16 +1249,37 @@ I disabled the package.
 summary(freq_fits$all)
 ```
 
+Compute the Nagelkerke R2 values for all frequentist models
+
+```{r}
+freq_nagelkerke_r2 <- map_dfr(freq_fits, function(fit) {
+  fmsb::NagelkerkeR2(fit) %>% as_tibble_row()}, 
+  .id="Model"
+)
+freq_nagelkerke_r2
+```
+
 ### Diagnostics
+
+#### Residuals
 
 Residual deviance is significantly smaller than null deviance so the predictors offer significant information.
 The median of deviance residuals is not very close to zero, which means there could be a small bias. The distribution of residuals should
 be approximately normal: [What do the residuals in a logistic regression mean](https://stats.stackexchange.com/questions/1432/what-do-the-residuals-in-a-logistic-regression-mean)
 
 ```{r Plot the deviance residuals}
-combined_data %>% drop_na(any_of(variables)) %>% mutate(residual=residuals(freq_fits$all)) %>% ggplot(aes(x=residual)) + geom_histogram()
+tmp <- combined_data %>% drop_na(any_of(variables)) %>% mutate(residual=residuals(freq_fits$all)) 
+tmp %>% mutate(high_residual = residual > 1) %>% select(anemia, high_residual) %>% table()
+tmp %>% ggplot(aes(x=residual)) + geom_histogram() + labs(title = "All")
 ```
 
+The residual seems to be high for anemic persons and low for non-anemic persons.
+
+```{r Plot the deviance residuals in males}
+tmp <-combined_data %>% filter(sex=="male") %>% drop_na(any_of(variables)) %>% mutate(residual=residuals(freq_fits$male))
+tmp %>% mutate(high_residual = residual > 1) %>% select(anemia, high_residual) %>% table()
+tmp %>% ggplot(aes(x=residual)) + geom_histogram() + labs(title = "Males")
+```
 
 For explanation of deviance see:
 
@@ -929,8 +1308,6 @@ is to check for
 
 #### Check for linearity
 
-```{r}
-```
 
 ```{r}
 probabilities <- predict(freq_fits$all, type = "response")
@@ -966,9 +1343,16 @@ All variables except maybe consecutive_deferrals and recent_deferrals seem to be
 
 ```{r Check for multicollinearity}
 vifs <- map_dfr(freq_fits, function(fit) as_tibble_row(car::vif(fit)), .id="Cohort")
-sorted_column_names <- vifs %>% summarise(across(everything(), mean)) %>% unlist() %>% sort(decreasing = TRUE) %>% names()
+sorted_column_names <- vifs %>% select(-Cohort) %>% summarise(across(everything(), mean)) %>% unlist() %>% sort(decreasing = TRUE) %>% names()
 # Columns sorted by mean value
-vifs %>% select(Cohort, all_of(sorted_column_names))
+vifs <- vifs %>% select(Cohort, all_of(sorted_column_names))
+freq_vifs <- t(vifs %>% column_to_rownames("Cohort")) %>% as_tibble(rownames="Variable")
+  #as.data.frame %>% rownames_to_column("Variable")
+freq_vifs
+filename <- sprintf("%s/anemia_vifs.tsv", table_path)
+if (save_tables) {
+  write_tsv(freq_vifs, filename)
+}
 ```
 According to https://www.statisticshowto.com/variance-inflation-factor/
 VIF value greater than 5 means that it is highly correlated with other predictors.
@@ -995,6 +1379,107 @@ g
 ```
 
 
+```{r}
+c <- data %>% 
+  #select(all_of(variables), prs_anemia) %>%    # PRS IDA is added even though it is not a predictor. On purpose.
+  select(all_of(variables)) %>% 
+  set_names(as.character(to_pretty_vector(names(.), descript))) %>%
+  cor()
+mynames <- str_sort(colnames(c), numeric=TRUE)
+c <- c[mynames, mynames]    # Use alphabetical order for rows and columns
+c2 <- c %>% as_tibble(rownames = "Phenotype")
+c2
+filename <- sprintf("%s/anemia_correlations.tsv", table_path)
+if (save_tables) write_tsv(c2, filename)
+
+filename <- sprintf("%s/anemia_correlations.pdf", fig_path)
+if (save_figs) cairo_pdf(filename)
+corrplot::corrplot(c)
+if (save_figs) dev.off()
+```
+
+### IDA PRS as predictor
+
+```{r}
+freq_formula_all2 <- as.formula(sprintf("anemia ~ %s", paste(c(variables, "prs_anemia"), collapse=" + ")))
+freq_formula2 <- as.formula(sprintf("anemia ~ %s", paste(setdiff(c(variables, "prs_anemia"), "female"), collapse=" + ")))
+formulas2 <- list(all=freq_formula_all2, male = freq_formula2,  female = freq_formula2, 
+                 pre_menopausal_female=freq_formula2,
+                 post_menopausal_female=freq_formula2)
+freq_fits2 <- map2(datas, formulas2, function(data, formula) stats::glm(formula, data = data, family = binomial))
+
+fit2 <- freq_fits2$all
+```
+
+```{r}
+#fit2
+summary(fit2)
+```
+
+```{r}
+glue::glue("The Nagelkerke R2 value is {format(R2, digits=3)}, sample size is {N}", 
+           .envir=fmsb::NagelkerkeR2(fit2))
+```
+
+```{r Plot the deviance residuals in model with anemia prs}
+tmp <-combined_data %>% drop_na(any_of(variables)) %>% mutate(residual=residuals(fit2))
+tmp %>% mutate(high_residual = residual > 1) %>% select(anemia, high_residual) %>% table()
+tmp %>% ggplot(aes(x=residual)) + geom_histogram() + labs(title = "Males")
+```
+
+```{r}
+df <- broom::tidy(fit2, conf.int=TRUE, exponentiate=TRUE)
+if (save_tables) {
+  filename <- sprintf("%s/anemia_cis_with_anemia_prs_predictor.tsv", table_path)
+  write_tsv(df, filename)
+}
+```
+
+```{r}
+g <- df %>% ggplot(aes(y=term, xmin=conf.low, xmax=conf.high, x=estimate)) +
+  geom_pointinterval()
+g
+if (save_figs) {
+  filename <- sprintf("%s/anemia_cis_with_anemia_prs_predictor.png", fig_path)
+  ggsave(filename=filename, g, width = 180,  height = 120, units="mm", dpi=300, scale=1.0, device="png")
+}
+```
+
+So, the model is really overfitting a lot.
+
+```{r}
+freq_nagelkerke_r2_with_ida_prs <- map_dfr(freq_fits2, function(fit) {
+  fmsb::NagelkerkeR2(fit) %>% as_tibble_row()}, 
+  .id="Model"
+)
+freq_nagelkerke_r2_with_ida_prs
+```
+
+Much better explanation of variation than without PRS IDA.
+
+#### Try the same with Hmisc
+
+```{r}
+fit_lrm <- rms::lrm(freq_formula_all2,
+             data = data)
+```
+
+```{r}
+fit_lrm
+# Broom doesn't really work for rms::lrm !!!!
+
+#df <- broom::tidy(fit2, conf.int=TRUE, exponentiate=TRUE)
+#g <- df %>% ggplot(aes(y=term, xmin=conf.low, xmax=conf.high, x=estimate)) +
+#  geom_pointinterval()
+```
+
+```{r}
+cat(sprintf("The Nagerkerke R2 is %f\n", fit_lrm$stats["R2"]))
+```
+
+The resulting R2 is the same as with glm and fmbs::NagelkerkeR2, so no point
+in running rms::lrm.
+
 ### Effect sizes
 
 The profiling method of MASS and my simple approximation seem to produce same results.
@@ -1003,7 +1488,7 @@ Next, check if bootstrapping would change this.
 
 ```{r Coefficients and confidence intervals}
 
-filename <- sprintf("%s/anemia_freq_cis.tsv", data_path)
+filename <- sprintf("%s/anemia_freq_cis.tsv", table_path)
 if (recompute | !file.exists(filename)) {
   res <- map(freq_fits, function(fit) mass_cis(fit))
   freq_cis <- 
@@ -1070,7 +1555,7 @@ freq_int_fits <- map2(datas, interaction_formulas, function(data, formula) stats
 
 ```{r Coefficients and confidence intervals of frequentist interaction models}
 
-filename <- sprintf("%s/anemia_freq_int_cis.tsv", data_path)
+filename <- sprintf("%s/anemia_freq_int_cis.tsv", table_path)
 if (recompute | !file.exists(filename)) {
   res <- map(freq_int_fits, function(fit) mass_cis(fit))
   freq_int_cis <- 
@@ -1116,6 +1601,139 @@ if (save_figs) {
 g
 ```
 
+### Model for blood donors only
+
+```{r}
+freq_formula_all_bd <- as.formula(sprintf("anemia ~ %s", paste(setdiff(variables, "blood_donor"), collapse=" + ")))
+freq_formula_bd <- as.formula(sprintf("anemia ~ %s", paste(setdiff(variables, c("female", "blood_donor")), collapse=" + ")))
+# There is a separation problem in males
+freq_formula_bd_male <- as.formula(sprintf("anemia ~ %s", paste(setdiff(variables, c("female", "blood_donor", "snp_1_169549811")), collapse=" + ")))
+
+print(freq_formula_all_bd)
+print(freq_formula_bd)
+print(freq_formula_bd_male)
+```
+
+
+```{r Check for separation in frequentist models on blood donors}
+# models_bd <- list(all=freq_formula_all, male = freq_formula,  female = freq_formula, 
+#                  pre_menopausal_female=freq_formula,
+#                  post_menopausal_female=freq_formula)
+model_bd <- tribble(
+  ~group, ~formula,
+  "all", freq_formula_all_bd,
+  "male", freq_formula_bd_male,
+  "female", freq_formula_bd,
+  "pre_menopausal_female", freq_formula_bd,
+  "post_menopausal_female", freq_formula_bd
+) %>%
+  inner_join(enframe(datas, name="group", value="data")) %>%
+  mutate(data = map(data, . %>% filter(blood_donor)))
+model_bd <- model_bd %>%
+  mutate(
+    detect_separation = pmap(., function(group, data, formula) {
+      stats::glm(formula,
+                 data = data,
+                 method="detect_separation",
+                 family = "binomial")
+    })
+  )
+```
+
+
+```{r Display separation results in frequentist models on blood donors}
+model_bd <- model_bd %>%  
+  mutate(separation = map_lgl(detect_separation, function(d) d$separation))
+model_bd %>%
+  select(group, separation)
+```
+
+The male model seem to be fully separable. Show the problematic variables:
+
+```{r}
+x <- model_bd %>% filter(separation) %>%
+  mutate(effects = map(detect_separation, function(d) d$coefficients))
+x$effects
+```
+
+```{r}
+model_bd %>%
+  pwalk(function(group, data, ...) {
+    cat(sprintf("Logistic regression, group: %s, n %i, cases %i, controls %i, prevalence %.1f%%\n",
+                group,
+                nrow(data),
+                sum(data$anemia),
+                sum(!data$anemia),
+                mean(data$anemia)*100))
+  })
+```
+
+```{r Fit all frequentist models on blood donors}
+model_bd <- model_bd %>%
+  mutate(
+    fit = pmap(., function(group, data, formula, ...) {
+      stats::glm(formula, data = data, family = binomial)
+    })
+  )
+
+
+r2 <- model_bd %>% 
+  select(group, fit) %>% 
+  deframe() %>%
+  map_dfr(function(fit) {
+    fmsb::NagelkerkeR2(fit) %>% as_tibble_row()}, 
+    .id="group"
+  )
+model_bd <- model_bd %>% inner_join(r2)
+model_bd %>% select(-c("formula", "data", "detect_separation", "fit"))
+```
+
+```{r}
+df <- model_bd %>% 
+  select(group, fit) %>% 
+  deframe() %>% 
+  map_dfr(tidy, exponentiate=TRUE, conf.int=TRUE, .id="group") 
+freq_bd_cis <- df %>%
+  filter(term != "(Intercept)") %>%
+  rename(Group = group, Variable=term, Estimate=estimate, low=conf.low, high=conf.high) %>%
+  mutate(Group = factor(Group, levels=names(cohort_colors))) %>%
+  mutate(Pretty = to_pretty_vector(Variable, descript2),
+         Pretty = fct_relevel(Pretty, ~ str_sort(., numeric=TRUE))) %>%
+  arrange(Pretty)
+if (save_tables) {
+  filename <- sprintf("%s/anemia_freq_bd_cis.tsv", table_path)
+  write_tsv(freq_bd_cis, filename)
+}
+```
+
+```{r}
+g <- freq_bd_cis %>% 
+  filter(Group %in% c("male", "pre_menopausal_female", "post_menopausal_female")) %>%
+  #filter(!(Group == "male" & Variable == "snp_1_169549811")) %>% # This is huge! Separation problem!
+  mutate(across(c(Pretty, Group), fct_rev)) %>%
+  ggplot(aes(x=Estimate, xmin=low, xmax=high, y=Pretty, color=Group)) + 
+  geom_vline(aes(xintercept=1), color="gray", size=1) +
+  geom_rect(data=make_stripes(freq_bd_cis, "Pretty") %>% filter(stripe==1),
+            mapping=aes(ymax = as.numeric(Pretty) + 0.5,
+                        ymin = as.numeric(Pretty) - 0.5),
+            fill = "gray", xmin=-Inf, xmax=Inf, alpha = 0.5, show.legend = FALSE, 
+            colour=NA, inherit.aes = FALSE) +
+  ggstance::geom_pointrangeh(position=position_dodge(width=1)) + 
+  labs(title="Frequentist IDA (blood donors)", x="Odds ratio", y="Standardized variables") + 
+  scale_colour_manual(values = cohort_colors, breaks=c("male", "pre_menopausal_female", "post_menopausal_female")) +
+  scale_x_log10() +
+  scale_y_discrete() + # !!!!! This is important. Solves the problem with position_dodge2 and the order of rect and pointrange geoms !!!!!!
+                         # Otherwise following error results: Error: Discrete value supplied to continuous scale
+
+  theme(
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank())
+if (save_figs) {
+  filename <- sprintf("%s/anemia_freq_bd_cis.png", fig_path)
+  ggsave(filename=filename, g, width = 180,  height = 120, units="mm", dpi=300, scale=1.0, device="png")
+}
+g
+```
 
 ## Bayesian logistic regression
 
@@ -1123,7 +1741,7 @@ g
 
 ```{r}
 
-iterations <- 1000
+iterations <- 10000
 cores <- 4
 #bayesian_variables <- setdiff(variables, "female")
 #bayes_variables <- variables
@@ -1142,22 +1760,51 @@ Flat prior is used for every parameter except the Intercept and sigma are studen
 get_prior(bayes_formula, data_male)
 ```
 
+```{r}
+for (group in names(datas)) {
+  tmp <- datas[[group]]
+  cat(sprintf("Logistic regression, group: %s, n %i, cases %i, controls %i, prevalence %.1f%%\n",
+              group,
+              nrow(tmp),
+              sum(tmp$anemia),
+              sum(!tmp$anemia),
+              mean(tmp$anemia)*100))
+}
+```
 
 ### Fit the models
+
+```{r, eval=FALSE}
+# For temporary use only
+#xhelper <- function(bayesian_fit, group) {
+#  filename <- sprintf("%s/noia_nobd_yes17_noinv/bayesian_fit_%s.rds", data_path, group)
+#  #print(filename)
+#  #print(bayesian_fit)
+#  saveRDS(bayesian_fit, filename)
+#}
+```
 
 
 ```{r Run all Bayesian models at once}
 fit_bayesian_helper <- function(group, data, formula) {
+  #filename <- sprintf("%s/noia_nobd_yes17_noinv/bayesian_fit_%s.rds", data_path, group)
   filename <- sprintf("%s/bayesian_fit_%s.rds", data_path, group)
   if (recompute | !file.exists(filename)) {
+    if (FALSE & group=="male") {
+      control <- list(max_treedepth = 15, adapt_delta = 0.999)
+      iterations2 <- 10000
+    } else  {
+      control <- list(max_treedepth = 15)
+      iterations2 <- iterations
+    }
     bayesian_fit <- brm(formula,
                             data = data, 
                             family = bernoulli(),
                             file = NULL,
-                            control = list(max_treedepth = 15),
+                            control = control,
                             refresh = 0,
                             cores = cores,
-                            iter = iterations
+                            iter = iterations2
     )
     saveRDS(bayesian_fit, filename)
   } else {
@@ -1436,7 +2083,7 @@ pretty_bayes_intervals <- function(bayesian_fits_list) {
 ```
 
 ```{r}
-filename <- sprintf("%s/anemia_bayes_cis.tsv", data_path)
+filename <- sprintf("%s/anemia_bayes_cis.tsv", table_path)
 if (recompute | !file.exists(filename)) {
   bayes_cis <- pretty_bayes_intervals(bayesian_fits_list)
   
@@ -1449,6 +2096,8 @@ if (recompute | !file.exists(filename)) {
 ```{r Compare confidence intervals of Bayesian method on four strata}
 helper <- function(df) {
   g <- df %>% 
+    #filter(!(Group=="male" & Variable == "snp_1_169549811")) %>%  ## REMOVE THIS!!!!!!!!!!!!!!!!
+    mutate(Pretty = factor(Pretty, levels=str_sort(unique(Pretty), numeric=TRUE))) %>%
     mutate(across(c(Pretty, Group), fct_rev)) %>%
     ggplot(aes(x=Estimate, xmin=low, xmax=high, y=Pretty, color=Group)) + 
     geom_vline(aes(xintercept=1), color="gray", size=1) +
@@ -1509,7 +2158,7 @@ spline_formulas <- list(#all=spline_formula_all,
 
 ### Fit models
 
-```{r Fit all Bayesian models}
+```{r Fit all Bayesian spline models}
 fit_bayesian_spline_helper <- function(group, data, formula) {
   filename <- sprintf("%s/bayesian_spline_fit_%s.rds", data_path, group)
   if (recompute | !file.exists(filename)) {
@@ -1578,13 +2227,13 @@ g_scaled <- x %>%
   geom_ribbon(mapping=aes(x=value, ymin=lower__, ymax=upper__), fill="lightgray") + 
   geom_line(color="blue") + 
   geom_abline(mapping=aes(intercept=intercept, slope=slope), data = line_coeffs) +
-  labs(title="Hb deferral, scaled", y="s(value)") +
+  labs(title="IDA, scaled", y="s(value)") +
   #lims(y=c(-10, 5)) +
   ggh4x::facet_grid2(rows=vars(group), cols=vars(name), scales = "free", independent = TRUE, 
                      labeller = labeller(group=plot_labeller))
 if (save_figs) {
-  filename <- sprintf("%s/splines_scaled.png", fig_path)
-  ggsave(filename=filename, plot=g_scaled, width = 180,  height=180, units="mm", dpi=300, scale=1.0, device="png")
+  filename <- sprintf("%s/splines_scaled.pdf", fig_path)
+  ggsave(filename=filename, plot=g_scaled, width = 180,  height=180, units="mm", dpi=300, scale=1.0, device="pdf")
 }
 g_scaled
 ```
@@ -1600,12 +2249,12 @@ g_unscaled <- x %>% inner_join(variable_stats, by=c("group", "name")) %>%
               data = line_coeffs %>% 
                 left_join(variable_stats, by=c("group", "name")) %>% 
                 mutate(intercept = -slope*mean/sd, slope = slope / sd)) +
-  labs(title="Hb deferral, unscaled", y="s(value)") +
+  labs(title="IDA, unscaled", y="s(value)") +
   ggh4x::facet_grid2(rows=vars(group), cols=vars(name), scales = "free", independent = TRUE,
                      labeller = labeller(group=plot_labeller))
 if (save_figs) {
-  filename <- sprintf("%s/splines_unscaled.png", fig_path)
-  ggsave(filename=filename, plot=g_unscaled, width = 180,  height=180, units="mm", dpi=300, scale=1.0, device="png")
+  filename <- sprintf("%s/splines_unscaled.pdf", fig_path)
+  ggsave(filename=filename, plot=g_unscaled, width = 180,  height=180, units="mm", dpi=300, scale=1.0, device="pdf")
 }
 g_unscaled
 ```
@@ -1613,7 +2262,7 @@ g_unscaled
 ### Effect sizes
 
 ```{r}
-filename <- sprintf("%s/spline_cis.tsv", table_path)
+filename <- sprintf("%s/anemia_spline_cis.tsv", table_path)
 if (recompute | !file.exists(filename)) {
   spline_cis <- pretty_bayes_intervals(spline_fits_list)
   write_tsv(spline_cis, file=filename)
@@ -1625,13 +2274,19 @@ if (recompute | !file.exists(filename)) {
 ```{r}
 spline_comparison_cis <- bind_rows(linear=bayes_cis, spline=spline_cis, .id="Dependency")
 g <- spline_comparison_cis %>%
-  filter(!(Pretty == "Smoking:Is blood donor" & Group == "post_menopausal_female")) %>%   # REMOVE THIS !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  mutate(Dependency = fct_recode(Dependency, `non-linear`="spline")) %>%
+  #filter(!(Pretty == "Smoking:Is blood donor" & Group == "post_menopausal_female")) %>%   # REMOVE THIS !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   filter(Group %in% c("male", "pre_menopausal_female", "post_menopausal_female")) %>%
+  mutate(Group = factor(Group, levels=c("male", "pre_menopausal_female", "post_menopausal_female"))) %>%
+  mutate(Pretty = fct_relevel(Pretty, function(levels) str_sort(levels, numeric=TRUE))) %>%
   mutate(across(c(Dependency, Pretty), fct_rev)) %>%
   mutate(hollow_dependency=factor(if_else(low<=1 & high>=1, NA_character_, as.character(Dependency)),
                              levels=levels(Dependency))) %>%
   ggplot(aes(x=Estimate, xmin=low, xmax=high, y=Pretty, color=Dependency, fill=hollow_dependency)) + 
-  geom_vline(aes(xintercept=1), color="gray", size=1) +
+  geom_vline(aes(xintercept=1), color="gray", 
+             #size=1
+             linewidth=1
+  ) +
   geom_stripes(bayes_cis %>% filter(Variable != "femaleTRUE"), Pretty) +
   ggstance::geom_linerangeh(position=position_dodge(width=1), size=0.2) + 
   geom_point(#aes(), 
@@ -1639,10 +2294,11 @@ g <- spline_comparison_cis %>%
              shape=21,
              size=1.5,
              position=position_dodge(width=1)) +
-  labs(title = "Linear vs spline dependency", x="Odds ratio", y="Standardized variables") + 
+  labs(#title = "Linear vs spline dependency", 
+       x="Odds ratio", y="Standardized variables") + 
   #scale_colour_manual(values = cohort_colors) +
   facet_wrap(~Group) +
-  scale_color_discrete(breaks = c("linear", "spline"), na.value = "NA") +
+  scale_color_discrete(breaks = c("linear", "non-linear"), na.value = "NA") +
   scale_fill_discrete(guide="none", na.value = "NA") +
   # scale_colour_manual(values = cohort_colors[names(cohort_colors) != "all"],
   #                     labels = cohort_names[names(cohort_names) != "all"], na.value = NA, drop=FALSE) +
@@ -1653,8 +2309,8 @@ g <- spline_comparison_cis %>%
   theme(legend.position="bottom",
         legend.direction = "horizontal")
 if (save_figs) {
-  filename <- sprintf("%s/linear_vs_spline.png", fig_path)
-  ggsave(filename=filename, plot=g, width = 180,  height=180, units="mm", dpi=300, scale=1.0, device="png")
+  filename <- sprintf("%s/anemia_linear_vs_spline.pdf", fig_path)
+  ggsave(filename=filename, plot=g, width = 180,  height=180, units="mm", dpi=300, scale=1.0, device="pdf")
 }
 
 g
@@ -1787,8 +2443,10 @@ sur <- unfiltered_combined_data %>% select(-age) %>% # Remove the duplicate age 
 cox_model_variables <- c("status", "age", setdiff(cox_variables, interactions))
 cat(sprintf("Model variables are %s\n", paste(cox_model_variables, collapse=", ")))
 exclusions_anemia_cox <- sur %>% summarise(across({{cox_model_variables}}, ~ sum(is.na(.))))
-filename <- sprintf("%s/exclusions_anemia_cox.tsv", base)
-write_tsv(exclusions_anemia_cox, filename)
+filename <- sprintf("%s/exclusions_anemia_cox.tsv", table_path)
+if (save_tables) {
+  write_tsv(exclusions_anemia_cox, filename)
+}
 t(exclusions_anemia_cox)
 old_n <- nrow(sur)
 sur <- sur %>% drop_na({{cox_model_variables}})
@@ -1880,6 +2538,113 @@ ggsurvplot(survival::survfit(Surv(age, status) ~ snp_17_58358769,
            risk.table = TRUE, risk.table.y.text.col=TRUE, risk.table.height = 0.3)
 ```
 
+```{r}
+helper <- function(variable) {
+  force(variable)
+  form <- sprintf("Surv(age, status) ~ %s", variable)
+  print(form)
+  form <- as.formula(form)
+  # Note! Below we need to use survminer::surv_fit instead of survival::survfit
+  # To fix the following error https://github.com/kassambara/survminer/issues/252
+  g <- ggsurvplot(
+    #survival::survfit(form, data=sur), 
+    survminer::surv_fit(form, data=sur), 
+             #fun=fun, 
+    legend = "right",
+    legend.labs = 0:2,
+    legend.title = "Dosage",
+    censor = FALSE,
+    conf.int = TRUE) 
+             #risk.table = TRUE, risk.table.y.text.col=TRUE, risk.table.height = 0.3)
+  #print("hullo")
+  g + labs(title=variable, y="")
+}
+G <- map(snip_variables, helper)
+# g1 <- helper("event")
+# g2 <- helper(NULL)  # no transformation means the normal survival curve
+# g3 <- helper("cumhaz")
+g <- G[[1]]$plot / G[[2]]$plot / G[[3]]$plot / G[[4]]$plot + plot_layout(guides = 'collect') + 
+  labs(y="Survival probability")
+if (save_figs) {
+  #filename <- sprintf("%s/pdf/deferral_kaplan_meyer.pdf", result_base)
+  filename <- sprintf("%s/old_anemia_kaplan_meyer.pdf", fig_path)
+  ggsave(filename=filename, g, width = 180,  height=180, units="mm", dpi=300, scale=1.0, device="pdf")
+}
+g
+#grid::grid.draw(grid::textGrob("Keno", x = 0.02, rot = 90))
+
+#arrange_ggsurvplots(G, ncol=1, nrow=4)
+```
+```{r KM plots for article}
+kaplan_meyer_helper <- function(variable, sur, smooth=FALSE) {
+  smooth_helper <- function(df, key) {
+    cat(sprintf("Variable %s, dosage %s, n=%i\n", key$variable, key$Dosage, nrow(df)))
+    min_time <- min(df$time)
+    max_time <- max(df$time)
+    result <- tibble(time=seq(min_time, max_time, length.out = 100))
+    for (variable2 in c("surv", "low", "high")) {
+      form <- sprintf("%s ~ s(time, bs='cs')", variable2)
+      form <- as.formula(form)
+      
+      gm <- mgcv::gam(form, data=df)
+      
+      result <- result %>% mutate({{variable2}} := as.vector(predict(gm, newdata=result)))
+    }
+    result
+  }
+  
+  force(variable)
+  form <- sprintf("Surv(age, status) ~ %s", variable)
+  print(form)
+  form <- as.formula(form)
+  res <- survminer::surv_fit(form, data=sur)
+  print(res$strata)
+  df <- tibble(time=res$time, surv=res$surv, low=res$lower, high=res$upper,
+               Dosage=factor(rep(0:(length(res$strata)-1), res$strata)),
+               variable = variable)
+  if (smooth) {
+    df <- df %>% 
+      group_by(Dosage, variable) %>%
+      filter(n() > 100) %>%
+      group_modify(smooth_helper) %>%
+      ungroup() %>%
+      mutate()
+  }
+  df
+}
+kaplan_meyer <- function(sur, smooth=FALSE) {
+  res <- map_dfr(snip_variables, function(variable) kaplan_meyer_helper(variable, sur, smooth)) %>%
+    mutate(variable = factor(variable, snip_variables)) %>%
+    drop_na()
+  res  
+}
+pretty_snips <- descript %>% filter(str_starts(Variable, "snp")) %>% select(Variable, Pretty) %>% deframe()
+res <- kaplan_meyer(sur)
+smoothed_res <- kaplan_meyer(sur, smooth=TRUE)
+g <- res %>% 
+  ggplot(aes(time, surv, color=Dosage, ymin=low, ymax=high, fill=Dosage)) + 
+  #pammtools::geom_stepribbon(alpha=0.2, color=NA) + # I could not easily install this on sandbox
+  geom_ribbon(alpha=0.2, color=NA) +
+  geom_step() +
+  facet_grid(rows=vars(variable), labeller=as_labeller(pretty_snips)) +
+  labs(x="Age [years]", y="Survival")
+smoothed_g <- smoothed_res %>% 
+  ggplot(aes(time, surv, color=Dosage, ymin=low, ymax=high, fill=Dosage)) + 
+  geom_ribbon(alpha=0.2, color=NA) +
+  geom_line() +
+  facet_grid(rows=vars(variable), labeller=as_labeller(pretty_snips)) +
+  labs(x="Age [years]", y="Survival")
+g
+smoothed_g
+if (save_figs) {
+  filename <- sprintf("%s/anemia_kaplan_meyer.pdf", fig_path)
+  ggsave(filename=filename, g, width = 180,  height=180, units="mm", dpi=300, scale=1.0, device="pdf")
+  filename <- sprintf("%s/smoothed_anemia_kaplan_meyer.pdf", fig_path)
+  ggsave(filename=filename, smoothed_g, width = 180,  height=180, units="mm", dpi=300, scale=1.0, device="pdf")
+}
+```
+
+
 ## Cox regression
 
 ```{r Define formulas}
@@ -1889,21 +2654,47 @@ print(cox_formula)
 print(cox_formula_all)
 ```
 
+```{r Show data sizes}
+helper <- function(data, group) {
+  tmp <- data %>% drop_na(any_of(cox_variables))
+  cat(sprintf("Cox PH model, group %s: %i donors, %i events, %i censored, prevalence %.1f%%\n", 
+              group,
+              nrow(tmp), 
+              sum(tmp$status == 1), 
+              sum(tmp$status == 0),
+              100*sum(tmp$status == 1) / nrow(tmp)))
+}
+helper(scaled_sur, "all")
+helper(scaled_sur_male, "male")
+helper(scaled_sur_female, "female")
+helper(scaled_sur_pre_menopausal_female, "pre_menopausal_female")
+helper(scaled_sur_post_menopausal_female, "post_menopausal_female")
+```
+
 ### Fit models
 
 ```{r}
-#sur_female <- bind_rows(sur_pre_menopausal_female, sur_post_menopausal_female)
-cox_fit_all    <- survival::coxph(cox_formula_all, data=scaled_sur)
-cox_fit_male   <- survival::coxph(cox_formula, data=scaled_sur_male)
-cox_fit_female <- survival::coxph(cox_formula, data=scaled_sur_female)
-cox_fit_pre_menopausal_female  <- survival::coxph(cox_formula, data=scaled_sur_pre_menopausal_female)
-cox_fit_post_menopausal_female <- survival::coxph(cox_formula, data=scaled_sur_post_menopausal_female)
-
-cox_fit_list <- list(all=cox_fit_all, male=cox_fit_male, female=cox_fit_female,
-                     pre_menopausal_female=cox_fit_pre_menopausal_female,
-                     post_menopausal_female=cox_fit_post_menopausal_female)
 filename <- sprintf("%s/cox_fits.rds", data_path)
-saveRDS(cox_fit_list, filename)
+if (recompute_survival | !file.exists(filename)) {
+  #sur_female <- bind_rows(sur_pre_menopausal_female, sur_post_menopausal_female)
+  cox_fit_all    <- survival::coxph(cox_formula_all, data=scaled_sur)
+  cox_fit_male   <- survival::coxph(cox_formula, data=scaled_sur_male)
+  cox_fit_female <- survival::coxph(cox_formula, data=scaled_sur_female)
+  cox_fit_pre_menopausal_female  <- survival::coxph(cox_formula, data=scaled_sur_pre_menopausal_female)
+  cox_fit_post_menopausal_female <- survival::coxph(cox_formula, data=scaled_sur_post_menopausal_female)
+  
+  cox_fit_list <- list(all=cox_fit_all, male=cox_fit_male, female=cox_fit_female,
+                       pre_menopausal_female=cox_fit_pre_menopausal_female,
+                       post_menopausal_female=cox_fit_post_menopausal_female)
+  saveRDS(cox_fit_list, filename)
+} else {
+  cox_fit_list <- readRDS(filename)
+  cox_fit_all    <- cox_fit_list$all
+  cox_fit_male   <- cox_fit_list$male
+  cox_fit_female <- cox_fit_list$female
+  cox_fit_pre_menopausal_female  <- cox_fit_list$pre_menopausal_female
+  cox_fit_post_menopausal_female <- cox_fit_list$post_menopausal_female
+}
 ```
 
 
@@ -1931,7 +2722,7 @@ get_cox_cis <- function(fit) {
 ```
 
 ```{r}
-filename <- sprintf("%s/anemia_normal_cox_cis.tsv", data_path)
+filename <- sprintf("%s/anemia_normal_cox_cis.tsv", table_path)
 if (recompute | !file.exists(filename)) {
   normal_cox_cis <- map_dfr(cox_fit_list, get_cox_cis, .id="Group") %>%  
     left_join(descript2, by=c(Variable = "Variable2")) %>%
@@ -2049,6 +2840,25 @@ print(fixed_cox_formula)
 print(fixed_cox_formula_all)
 ```
 
+```{r Show data sizes in stratified Cox models}
+helper <- function(data, group) {
+  tmp <- data %>% drop_na(any_of(cox_variables))
+  cat(sprintf("Cox PH model, group %s: %i donors, %i events, %i censored, prevalence %.1f%%\n", 
+              group,
+              nrow(tmp), 
+              sum(tmp$status == 1), 
+              sum(tmp$status == 0),
+              100*sum(tmp$status == 1) / nrow(tmp)))
+}
+helper(scaled_sur, "all")
+helper(scaled_sur_male, "male")
+helper(scaled_sur_female, "female")
+helper(scaled_sur_pre_menopausal_female, "pre_menopausal_female")
+helper(scaled_sur_post_menopausal_female, "post_menopausal_female")
+```
+
+### Fit models
+
 ```{r}
 fixed_cox_fit_all <- survival::coxph(fixed_cox_formula_all, data=scaled_sur)
 fixed_cox_fit_male <- survival::coxph(fixed_cox_formula, data=scaled_sur_male)
@@ -2078,7 +2888,7 @@ Here, modeled means that the variable's HR is estimated. Stratified means that t
 
 ```{r Extract stratified Cox model results, eval=fix}
 
-filename <- sprintf("%s/anemia_stratified_cox_cis.tsv", data_path)
+filename <- sprintf("%s/anemia_stratified_cox_cis.tsv", table_path)
 if (recompute | !file.exists(filename)) {
   stratified_cox_cis <- map_dfr(fixed_cox_fit_list, get_cox_cis, .id="Group") %>%  
     left_join(descript2, by=c(Variable = "Variable2")) %>%

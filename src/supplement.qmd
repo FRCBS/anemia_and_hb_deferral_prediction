@@ -1,0 +1,188 @@
+---
+title: "Supplement to The value of genetic data from 665,460 individuals in managing iron deficiency anemia and suitability to donate blood"
+crossref: 
+  fig-prefix: ""
+  tbl-prefix: ""
+format: 
+  html: default
+  docx: default
+  pdf:
+    toc: true
+    toc-depth: 2
+    keep-tex: true
+    #classoption: captions=nooneline  # Does not work # Single-line caption is not centered
+    include-in-header: 
+      text: |
+        \setcapindent{0pt}       % No hanging captions
+        %\AddToHook{cmd/section/before}{\clearpage}   % Add \clearpage command before each new section
+    include-before-body: 
+      text: |
+        \KOMAoptions{captions=nooneline,bibliography=totoc} 
+        %\KOMAoption{captions}{nooneline}  % Don't center single-line captions
+        %\KOMAoption{bibliography}{totoc}  % Reference shows in the table of contents
+        \renewcommand{\thetable}{S\arabic{table}}
+        \renewcommand{\thefigure}{S\arabic{figure}}
+        \renewcommand{\thepage}{S\arabic{page}}
+    biblio-title: References
+    cite-method: biblatex
+  #latex: 'default'
+bibliography: references.bib
+---
+
+```{=html}
+<style type="text/css">
+caption, .table-caption {
+  text-align: left;
+}
+</style>
+```
+
+
+# Ethics statement and materials
+
+
+Patients and control subjects in FinnGen provided informed consent for biobank research, based on the Finnish Biobank Act. Alternatively, separate research cohorts, collected prior the Finnish Biobank Act came into effect (in September 2013) and start of FinnGen (August 2017), were collected based on study-specific consents and later transferred to the Finnish biobanks after approval by Fimea, the National Supervisory Authority for Welfare and Health. Recruitment protocols followed the biobank protocols approved by Fimea. The Coordinating Ethics Committee of the Hospital District of Helsinki and Uusimaa (HUS) approved the FinnGen study protocol Nr HUS/990/2017.
+
+The FinnGen study is approved by Finnish Institute for Health and Welfare (permit numbers: THL/2031/6.02.00/2017, THL/1101/5.05.00/2017, THL/341/6.02.00/2018, THL/2222/6.02.00/2018, THL/283/6.02.00/2019, THL/1721/5.05.00/2019, THL/1524/5.05.00/2020, and THL/2364/14.02/2020), Digital and population data service agency (permit numbers: VRK43431/2017-3, VRK/6909/2018-3, VRK/4415/2019-3), the Social Insurance Institution (permit numbers: KELA 58/522/2017, KELA 131/522/2018, KELA 70/522/2019, KELA 98/522/2019, KELA 138/522/2019, KELA 2/522/2020, KELA 16/522/2020 and Statistics Finland (permit numbers: TK-53-1041-17 and TK-53-90-20). 
+
+The Biobank Access Decisions for FinnGen samples and data utilized in FinnGen Data Freeze 6 include: THL Biobank BB2017_55, BB2017_111, BB2018_19, BB_2018_34, BB_2018_67, BB2018_71, BB2019_7, BB2019_8, BB2019_26, BB2020_1, Finnish Red Cross Blood Service Biobank 7.12.2017, Helsinki Biobank HUS/359/2017, Auria Biobank AB17-5154, Biobank Borealis of Northern Finland_2017_1013,  Biobank of Eastern Finland 1186/2018, Finnish Clinical Biobank Tampere MH0004, Central Finland Biobank 1-2017, and Terveystalo Biobank STB 2018001. 
+
+# Methods
+
+## Model fitting
+
+The Bayesian logistic regressions are fitted with the `brm` function of the `brms` package [@Burkner2017]. The `survival` package [@Therneau2000] was used to fit Cox models.
+
+To validate the logistic regression models, the residual deviances, linearity assumption of the predictors and multicollinearity (see Tables @tbl-deferral-freq-vifs-@tbl-anemia-freq-vifs for Variance Inflation Factors, and Tables @tbl-deferral-correlations-@tbl-anemia-correlations  and Figures @fig-anemia-correlations-@fig-deferral-correlations for correlations) were checked. The proportional hazards assumptions were checked for the Cox PH models. We also experimented modeling variables age, weight and days to previous donation using splines, to see whether the dependence between the predictors and the response is linear or non-linear, see Figures @fig-deferral-splines-unscaled and @fig-deferral-linear-vs-spline for Hb-deferral, and Figures @fig-anemia-splines-unscaled and @fig-anemia-linear-vs-spline for IDA. However, we decided that the difference between models with splines and models with linear predictors only is too small to warrant the more complicated spline model. Hence, the formulas for the final models were
+
+### Logistic regression for Hb-deferral
+
+```
+Hb_deferral ~ previous_Hb + days_to_previous_fb + age + year + 
+    warm_season + hour + recent_donations + recent_deferrals + 
+    nb_donat + weight + smoking + snp_17_58358769 + snp_6_32617727 + 
+    snp_15_45095352 + snp_1_169549811 + prs_anemia + prs_ferritin + 
+    prs_hemoglobin
+```
+
+### Cox PH model with time-dependent covariates for Hb-deferral
+
+```
+Surv(tstart, tstop, status) ~ weight + smoking + snp_17_58358769 + 
+    snp_6_32617727 + snp_15_45095352 + snp_1_169549811 + prs_anemia + 
+    prs_ferritin + prs_hemoglobin + donation_count + previous_Hb
+```
+
+### Logistic regression for IDA
+
+```
+anemia ~ age + weight + smoking + blood_donor + prs_ferritin +
+    prs_hemoglobin + snp_17_58358769 + 
+    snp_6_32617727 + snp_15_45095352 + snp_1_169549811 +
+    blood_donor:weight + blood_donor:smoking
+```
+
+### Cox PH model for IDA
+
+```
+Surv(age, status) ~ weight + smoking + blood_donor  + prs_ferritin +
+    prs_hemoglobin + snp_17_58358769 + 
+    snp_6_32617727 + snp_15_45095352 + snp_1_169549811 +
+    blood_donor:weight + blood_donor:smoking
+```
+    
+The formula of the total genetic score for Hb-deferral is 
+\begin{align}
+TGS=&\beta_{SNP,1} \cdot X_{SNP,1} +
+\beta_{SNP,6} \cdot X_{SNP,6} +
+\beta_{SNP,15} \cdot X_{SNP,15} +
+\beta_{SNP,17} \cdot X_{SNP,17} + \\
+&\beta_{PRS,IDA} \cdot X_{PRS,IDA} +
+\beta_{PRS,ferritin} \cdot X_{PRS,ferritin} +
+\beta_{PRS,hemoglobin} \cdot X_{PRS,hemoglobin},
+\end{align}
+where the $\beta$ coefficients are learned during the logistic or Cox PH model fitting.
+
+# Results
+
+To get a measure for the similarity of the peaks of IDA meta-analysis (defined as the SNPs within 3 Mbp radius around the lead SNP, Figure 2C) with the nearest peaks of the hemoglobin and ferritin phenotypes (Figure 2A and B), we computed the fraction of the genes related to each peak in IDA meta-analysis contained within the corresponding set of genes of the nearest ferritin or hemoglobin peaks. The inclusion of genes of IDA peaks in ferritin peaks were for lead SNP rs6025 in chromosome 1: 100%, rs3129761 in chromosome 6: 4%, rs199138 in chromosome 15: 100% and rs199598395 in chromosome 17: 82%. Respectively for hemoglobin, they were rs6025: 0%, rs3129761: 100%, rs199138: 29% and rs199598395: 62%. Hence, the genes most likely to contain the significant SNPs of IDA are also implicated by the SNPs of either ferritin or hemoglobin GWAS.
+
+The distribution of the four selected SNPs in the INTERVAL cohort is shown in Figure @fig-anemia-genotype-distributions-uk and
+Table @tbl-anemia-genotype-distribution-interval. Due to the alternative allele in chromosome 17 being mostly absent in the INTERVAL cohort, we had to drop that variable from the IDA model.
+The comparison of the effect sizes of the logistic model of IDA in Finngen and INTERVAL cohorts can be seen in Figure @fig-fi-uk-cis.  Even though the low number of individuals in INTERVAL causes the confidence intervals to be larger than in the FinnGen model, the signs of the effects agree mostly. The SNP in chromosome 15 has protective effect in both FinnGen and INTERVAL, although the effect is not significant in all groups. 
+
+The PRSs for ferritin and hemoglobin are significant in all subgroups of INTERVAL, and the effects are large compared to the effects of other predictors. Curiously, the direction of the effect of Hb PRS seems to be contrary to what one would expect: that high Hb protects from iron deficiency anemia. The reason for this could be that people that have genetically high Hb can donate blood often, which will eventually cause iron deficiency anemia. We experimented this hypothesis by restricting to the blood donors in FinnGen, when fitting the logistic regression for IDA. This caused the sign of the Hb PRS to be slightly positive. So, there seems to be some interaction between the blood donor status and variables such as age, PRS hemoglobin and weight.
+
+To test the predictive value of the polygenic scores of ferritin and hemoglobin, we used these as predictors of the ferritin and hemoglobin, respectively, in simple linear regressions. The scatter plot and $R^2$ value in @fig-fi-hb-scatter indicate low correlation for hemoglobin in FinnGen (FinnGen has no ferritin measurements). In the INTERVAL cohort the correlation of hemoglobin is analysed in @fig-uk-hb-scatter, and the correlation of ferritin in @fig-uk-ferritin-scatter. The correlation between PRS of ferritin and the ferritin levels is quite high, but this could be partly due to INTERVAL forming 14% of the individuals that were used in the meta-analysis of ferritin, which subsequently was used to derive the PRS weights for ferritin.
+
+# Acknowledgements
+
+We want to acknowledge the participants and investigators of FinnGen study. The FinnGen project is funded by two grants from Business Finland (HUS 4685/31/2016 and UH 4386/31/2016) and the following industry partners: AbbVie Inc., AstraZeneca UK Ltd, Biogen MA Inc., Bristol Myers Squibb (and Celgene Corporation & Celgene International II Sàrl), Genentech Inc., Merck Sharp & Dohme Corp, Pfizer Inc., GlaxoSmithKline Intellectual Property Development Ltd., Sanofi US Services Inc., Maze Therapeutics Inc., Janssen Biotech Inc, Novartis AG, and Boehringer Ingelheim. Following biobanks are acknowledged for delivering biobank samples to FinnGen: [Auria Biobank](https://www.auria.fi/biopankki), [THL Biobank](https://www.thl.fi/biobank), [Helsinki Biobank](https://www.helsinginbiopankki.fi), [Biobank Borealis of Northern Finland](https://www.ppshp.fi/Tutkimus-ja-opetus/Biopankki/Pages/Biobank-Borealis-briefly-in-English.aspx), [Finnish Clinical Biobank Tampere](https://www.tays.fi/en-US/Research_and_development/Finnish_Clinical_Biobank_Tampere), [Biobank of Eastern Finland](https://www.ita-suomenbiopankki.fi/en), [Central Finland Biobank](https://www.ksshp.fi/fi-FI/Potilaalle/Biopankki), [Finnish Red Cross Blood Service Biobank](https://www.veripalvelu.fi/verenluovutus/biopankkitoiminta) and [Terveystalo Biobank](https://www.terveystalo.com/fi/Yritystietoa/Terveystalo-Biopankki/Biopankki/). All Finnish Biobanks are members of [BBMRI.fi infrastructure](https://www.bbmri.fi). Finnish Biobank Cooperative - [FINBB](https://finbb.fi/) is the coordinator of BBMRI-ERIC operations in Finland. The Finnish biobank data can be accessed through the [Fingenious® services](https://site.fingenious.fi/en/) managed by FINBB.
+
+Participants in the INTERVAL randomised controlled trial were recruited with the active collaboration of NHS Blood and Transplant England (www.nhsbt.nhs.uk), which has supported field work and other elements of the trial. DNA extraction and genotyping were co-funded by the National Institute for Health and Care Research (NIHR), the NIHR BioResource (http://bioresource.nihr.ac.uk) and the NIHR Cambridge Biomedical Research Centre (BRC-1215-20014) [^1]. The academic coordinating centre for INTERVAL was supported by core funding from the: NIHR Blood and Transplant Research Unit in Donor Health and Genomics (NIHR BTRU-2014-10024), NIHR BTRU in Donor Health and Behaviour (NIHR203337), UK Medical Research Council (MR/L003120/1), British Heart Foundation (SP/09/002; RG/13/13/30194; RG/18/13/33946) and NIHR Cambridge BRC (BRC-1215-20014). A complete list of the investigators and contributors to the INTERVAL trial is provided in reference [@DiAngelantonio2017]. The academic coordinating centre would like to thank blood donor centre staff and blood donors for participating in the INTERVAL trial.
+
+[^1]: The views expressed are those of the author(s) and not necessarily those of the NIHR, NHSBT or the Department of Health and Social Care.
+
+This work was also supported by Health Data Research UK, which is funded by the UK Medical Research Council, Engineering and Physical Sciences Research Council, Economic and Social Research Council, Department of Health and Social Care (England), Chief Scientist Office of the Scottish Government Health and Social Care Directorates, Health and Social Care Research and Development Division (Welsh Government), Public Health Agency (Northern Ireland), British Heart Foundation and Wellcome.
+
+# Table captions
+
+The actual tables are in the separate Supplemental Excel file.
+
+<!--
+Note! The following file is generated by the chunk "Write table captions to file" in file create_anemia_and_deferral_article_results.Rmd.
+-->
+{{< include table_captions.txt >}}
+
+# Figures
+
+![Description of the non-continuous predictive variables in IDA models. Variable histograms of the FinnGen data used in the Bayesian logistic regression for IDA (n=136,573).](pdf/anemia_histogram_case_control1.pdf){#fig-anemia-histogram-case-control1}
+
+![Description of the continuous predictive variables in IDA models. Variable histograms of the FinnGen data used in the Bayesian logistic regression for IDA (n=136,573).](pdf/anemia_histogram_case_control2_var_width.pdf){#fig-anemia-histogram-case-control2}
+
+![Description of the non-continuous predictive variables in Hb-deferral model. Variable histograms of the last blood donations used in the Bayesian logistic regression for Hb-deferral (n=27,662).](pdf/deferral_histogram_case_control1.pdf){#fig-deferral-histogram-case-control1}
+
+![Description of the continuous predictive variables in Hb-deferral model. Variable histograms of the last blood donations used in the Bayesian logistic regression for Hb-deferral (n=27,662).](pdf/deferral_histogram_case_control2.pdf){#fig-deferral-histogram-case-control2}
+
+![Quantile-quantile plots of the p-values of the IDA, hemoglobin, ferritin and Hb-deferral GWASes. The plots and the genomic inflation factors, which are denoted by lambda below the plots, do not indicate large inflation of p-values.](png/qq_all.png){#fig-qq-all}
+
+![Distribution of dosages of the four SNPs in blood donors of FinnGen by the Hb-deferral status.](pdf/deferral_genotype_distributions.pdf){#fig-deferral-genotype-distributions}
+
+![Distribution of dosages of the four SNPs in FinnGen by the IDA status.](pdf/anemia_genotype_distributions.pdf){#fig-anemia-genotype-distributions}
+
+![Correlations between predictor variables in the logistic IDA model. The PRS for IDA in not used as a predictor, since the GWAS the PRS is based on is derived using the same data as is used for model fitting. This would lead to overfitting.](pdf/anemia_correlations.pdf){#fig-anemia-correlations}
+
+![Correlations between predictor variables in the logistic Hb-deferral model.](pdf/deferral_correlations.pdf){#fig-deferral-correlations}
+
+
+
+
+
+
+![Comparison of modeling predictors age, days to previous donation and weight linearly or non-linearly using splines in the multivariable logistic Hb-deferral model. The fitted splines are shown in blue and their 95% confidence bands in gray. The black lines are the linear predictor fits. With the exception of the days to previous donation variable for premenopausal females, all linear fits are included in the confidence bands of the corresponding splines.](pdf/deferral_splines_unscaled.pdf){#fig-deferral-splines-unscaled}
+
+![Comparison of the odds ratios of other predictors when age, days to previous donation and weight variables are modeled either linearly or non-linearly using splines in the multivariable logistic Hb-deferral model. The mean and the 95% confidence intervals are shown for each variable. The filled circles denote significant effects. In all cases the significance status is the same whether the variables are modeled linearly or non-linearly.](pdf/deferral_linear_vs_spline.pdf){#fig-deferral-linear-vs-spline}
+
+![Comparison of modeling predictor age linearly or non-linearly using splines in the multivariable logistic IDA model. The fitted splines are shown in blue and their 95% confidence bands in gray. The black lines are the linear fits.](pdf/anemia_splines_unscaled.pdf){#fig-anemia-splines-unscaled}
+
+![Comparison of the odds ratios of other predictors when age variable is modeled either linearly or non-linearly using splines in the multivariable logistic IDA model. The mean and the 95% confidence intervals are shown for each variable. The filled circles denote significant effects. In all cases the signicance status is the same whether the variables are modeled linearly or non-linearly.](pdf/anemia_linear_vs_spline.pdf){#fig-anemia-linear-vs-spline}
+
+![The Kaplan-Meyer curves of Hb-deferral stratified by the dosage size of the four SNPs. The 95% confidence bands for the curves are shown in light color.](pdf/deferral_kaplan_meyer.pdf){#fig-deferral-kaplan-meyer}
+
+![The Kaplan-Meyer curves of IDA stratified by the dosage size of the four SNPs. The 95% confidence bands for the curves are shown in light color. Both the curves and the confidence bands are smoothed to avoid showing individual level data.](pdf/smoothed_anemia_kaplan_meyer.pdf){#fig-anemia-kaplan-meyer}
+
+![Distribution of dosages of the four SNPs in INTERVAL by the IDA status.](pdf/anemia_genotype_distributions_uk.pdf){#fig-anemia-genotype-distributions-uk}
+
+![Comparison of the odd ratios for IDA Logistic regression between FinnGen (n=136,573) and INTERVAL cohorts (n=39,979). To be able to estimate the model for the INTERVAL cohort, we had to drop the variable for the SNP in chromosome 17 due to its low counts.](pdf/fi_uk_cis.pdf){#fig-fi-uk-cis}
+
+![Correlation between Hb PRS and Hb among the blood donors of FinnGen. The correlation ($R^2$) for the linear fit is shown in the bottom right corner, and a smoothed curve (in blues) with its 95% confidence band (gray) are also shown.](png/fi_hb_scatter.png){#fig-fi-hb-scatter}
+
+![Correlation between Hb PRS and Hb in the INTERVAL cohort.](png/uk_hb_scatter.png){#fig-uk-hb-scatter}
+
+![Correlation between ferritin PRS and logarithm of ferritin in the INTERVAL cohort.](png/uk_ferritin_scatter.png){#fig-uk-ferritin-scatter}
+
+![Histograms of medians (over individuals) of the contributions of genetic variables (effect size times the variable value) in each bin defined by the deciles of the total genetic risk score of the Cox PH model with time-dependent covariates for Hb-deferral. Note that the large jump in the contribution of the SNP in chromosome 15 for females is due to the heterozygote being the most common case in the last decile, hence the median will be larger than zero.](pdf/deferral_genetic_risk_histograms.pdf){#fig-deferral-genetic-risk-histograms}
+
+![The same Manhattan plot of the hemoglobin as in the main text, but now coloured by the power to detect the genome-wide significant SNP in the setting of IDA in FinnGen, that is, IDA prevalence of 0.037 and sample size 665,000.](pdf/hemoglobin_power_manhattan.pdf){#fig-hemoglobin-power-manhattan}
+
+![PheWAS plot of SNP rs1800562 (chromosome 6, position 26092913, other allele G, effect allele A), which is the lead SNP in the only peak in the Manhattan plot of "disorders of iron metabolism" phenotype in FinnGen. The effect sizes are 5.42 and -0.125 for disorders of iron metabolism and IDA, respectively. Even though the SNP is has high effect for disorders of iron metabolims, its effect on IDA is much smaller.](pdf/locuszoom.pdf){#fig-locuszoom}

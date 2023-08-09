@@ -8,8 +8,8 @@ output: md_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 
-library(qqman)
 library(tidyverse)
+library(qqman)
 library(cowplot)
 library(tictoc)
 library(ggrepel)
@@ -18,13 +18,17 @@ library(GGally)  # for geom_stripped_cols/rows
 library(lemon)   # for facet_rep_grid
 library(slider)
 library(openxlsx)
+library(ggh4x)
+library(tableone)
+library(patchwork)
 
 source("common.R")
 recompute_manhattan <- FALSE
 recompute_annotation <- FALSE
-save_figs <- FALSE
+save_figs <- TRUE
 base <- "~/FRCBS/blood_health_phewas"
-result_base <- "~/FRCBS/anemia_and_deferral_article"
+result_base <- "~/FRCBS/results_for_anemia_and_deferral_article"
+table_path <- sprintf("%s/table", result_base)
 presentation_base <- "~/FRCBS/presentation-anemia-isbt-2022"
 ```
 
@@ -42,7 +46,7 @@ cohort_colors <- c(all = b[5], male = b[4], female = b[1], pre_menopausal_female
 cohort_names <- c(all = "All", male = "Male", female = "Female", pre_menopausal_female="Premenopausal female", 
                   post_menopausal_female="Postmenopausal female")
 cohort_names2 <- setNames(names(cohort_names), cohort_names)
-
+pheno_names <- c(Anemia="IDA", Deferral="Hb-deferral")
 # Input is a dataframe that has a factor column whose name is given as parameter
 # Returns a dataframe with two columns
 # stripe column has alternating values 0 and 1
@@ -73,43 +77,7 @@ geom_stripes2 <- function(df, Variable) {
 ```
 
 ```{r Helper functions}
-closest_snip <- function(df, pattern, radius=NULL) {
-  stopifnot(nrow(pattern) == 1)
-  result <- df %>% filter(chr==pattern$chr) %>%
-    mutate(dist = abs(bp - pattern$bp))
-  if (is.null(radius)) {
-    result <- result %>% slice_min(order_by = dist, n=1, with_ties = FALSE)   # return closest snip
-  } else {
-    result <- result %>% filter(dist <= radius, p < 5e-8)   # return all significant snips within radius
-  }
-  result %>% relocate(chr)
-}
-get_peaks <- function(df, centers) {
-  helper <-  function(...) {
-    center <- tibble(...)
-    result <- closest_snip(df, center, radius=radius) %>% mutate(center_chr=center$chr, center_bp=center$bp)
-    return(result)
-  }
-  pmap_dfr(centers, helper)
-}
-get_closest_snips <- function(df, centers) {
-  helper <-  function(...) {
-    center <- tibble(...)
-    result <- closest_snip(df, center) %>% mutate(orig_chr=center$chr, orig_bp=center$bp)
-    return(result)
-  }
-  pmap_dfr(centers, helper)
-}
-jaccard_index <- function(set1, set2) {
-  i <- length(intersect(set1, set2))
-  u <- length(union(set1, set2))
-  return(list(numerator=i, denominator=u, fraction=i/u))
-}
-inclusion <- function(set1, set2) {
-  i <- length(intersect(set1, set2))
-  u <- length(set1)
-  return(list(numerator=i, denominator=u, fraction=i/u))
-}
+
 ```
 
 
@@ -198,6 +166,39 @@ stat_stripes <- function(mapping = NULL, data = NULL, geom = "rect",
 }
 ```
 
+```{r}
+# Function to to unify x axis ranges on each row.
+# Returns a list of scales that can be passed as a parameter to the ggh4x::facetted_pos_scales function,
+# to modify individual panels in a facetted plot
+unify_range_by_rows <- function(g) {
+  b <- ggplot_build(g)
+  L <- length(b$layout$panel_scales_x)
+  #cols <- 2  # Where is this information stored? Now I have to handcode the number of columns.
+  cols <- n_distinct(b$layout$layout$COL)  # Maybe like this?
+  rows <- L / cols
+  # Unify ranges of a single facet row
+  unify <- function(r2) {
+    left <- map_dbl(r2, function(x) x[[1]])  # Left ends of the ranges
+    right <- map_dbl(r2, function(x) x[[2]])  # Right ends of the ranges
+    u <- c(min(left), max(right))
+    u <- rep(list(u), length(left))  # Repeat the same range for each column
+    # Change this so that a list is returned
+    u
+  }
+  # Extract limits from each panel
+  L <- list()
+  for (i in seq(1, rows)) {
+    tmp <- b$layout$panel_scales_x
+    r <- tmp[seq((i-1)*cols + 1, i*cols)]
+    r2 <- map(r, function(x) x$range$range) # each item is numeric vector of length two
+    res <- unify(r2)
+    L <- append(L, res)
+  }
+  scales <- map(L, function(r) scale_x_continuous(limits = r))  # Turn list of ranges into a list of scales
+  scales
+}
+```
+
 ## Effect sizes
 
 ```{r, eval=FALSE}
@@ -210,13 +211,13 @@ deferral_cox %>% filter(Group=="male") %>% #droplevels() %>%
 
 ```{r Read odds ratios and hazard ratios}
 # Order the snips by chromosomes
+ordered_snips <- c("SNP 1:169549811", "SNP 6:32617727", "SNP 15:45095352", "SNP 17:58358769")
 sort_variables <- function(df) {
   if (is.factor(df$Pretty)) {
     v <- sort(levels(df$Pretty))
   } else {
     v <- sort(unique(df$Pretty))
   }
-  ordered_snips <- c("SNP 1:169549811", "SNP 6:32617727", "SNP 15:45095352", "SNP 17:58358769")
   v[v %in% ordered_snips] <- ordered_snips
   return(df %>% mutate(Pretty = factor(Pretty, levels=v),
                        Group = factor(Group, levels=names(cohort_colors)))) 
@@ -285,6 +286,7 @@ if (save_figs) {
 ### Faceted forest plot
 
 ```{r}
+mygroups <- setdiff(names(cohort_colors), "all")
 tmp <- coeffs %>%
   filter(Group != "all") %>% 
   filter(model == "Cox" & Group %in% c("male", "female") |
@@ -309,15 +311,87 @@ g <- tmp %>%
              position=position_dodge(width=1))+
              #key_glyph=ggstance::draw_key_pointrangeh) +
   labs(x="Odds/hazard ratio", y="Standardized variables") +
+  #labs(x="Hazard ratio", y="Standardized variables") +
   facet_grid(#model ~ phenotype,
              rows = vars(model), cols = vars(phenotype),
+             labeller = labeller(phenotype = pheno_names),
              scales = "free", space = "free", shrink=TRUE, drop=FALSE) +
-  scale_colour_manual(values = cohort_colors[names(cohort_colors) != "all"],
-                      labels = cohort_names[names(cohort_names) != "all"], na.value = NA, drop=FALSE) +
+  scale_colour_manual(values = cohort_colors[mygroups],
+                      labels = cohort_names[mygroups],
+                      breaks = mygroups, na.value = NA, drop=FALSE) +
   scale_fill_manual(guide="none",
-                    values = cohort_colors[names(cohort_colors) != "all"],
-                      labels = cohort_names[names(cohort_names) != "all"], na.value = NA, drop=FALSE) +
+                    values = cohort_colors[mygroups],
+                      labels = cohort_names[mygroups], na.value = NA, drop=FALSE) +
   guides(color = guide_legend(override.aes = list(shape = 16))) +
+  #scale_x_log10() +
+  scale_y_discrete() +  # !!!!! This is important. Solves the problem with position_dodge2 and the order of rect and pointrange geoms !!!!!!
+                         # Otherwise following error results: Error: Discrete value supplied to continuous scale
+  theme(legend.position="bottom",    
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank())
+
+# Same xlims in both facets
+scales2 <- unify_range_by_rows(g)
+gg <- g + ggh4x::facetted_pos_scales(scales2)
+
+if (save_figs) {
+  filename <- sprintf("%s/pdf/facet_forest.pdf", result_base)
+  ggsave(filename=filename, plot=gg, width = 180, height = 180, units="mm", dpi=300, scale=1.0, device="pdf")
+}
+gg
+```
+
+
+### Compare Finnish and UK anemia effect sizes
+
+```{r}
+#filename <- sprintf("%s/table/2022-10-17b_uk_anemia_bayes_cis.tsv", result_base)
+filename <- sprintf("%s/table/2022-10-24_uk_anemia_bayes_cis.tsv", result_base)
+uk_anemia_bayes <- read_tsv(filename) %>% # %>% sort_variables
+  mutate(Pretty = if_else(Pretty == "smoking", "Smoking", Pretty))
+
+
+```
+
+
+```{r FinnGen INTERVAL comparison faceted by cohort}
+tmp <- bind_rows(FinnGen=anemia_bayes, INTERVAL=uk_anemia_bayes, .id="population") %>%
+  #filter(Group != "all") %>% 
+  filter(Group %in% c("male", "pre_menopausal_female", "post_menopausal_female")) %>%
+  #filter(phenotype=="deferral") %>% 
+  sort_variables() %>%
+  mutate(across(c(Group, Pretty), fct_rev),
+         hollow_group=factor(if_else(low<=1 & high>=1, NA_character_, as.character(Group)),
+                             levels=levels(Group)),
+         hollow_population=factor(if_else(low<=1 & high>=1, NA_character_, as.character(population)),
+                             levels=c("finnish", "uk"))
+         ) %>%
+  droplevels()
+
+included_groups <- setdiff(names(cohort_colors), c("all", "female"))
+g <- tmp %>%
+  ggplot(aes(x=Estimate, xmin=low, xmax=high, y=Pretty, color=Group, fill=hollow_group))+
+  stat_stripes(aes(stripe=Pretty), #row_sizes=c(Bayes=21, Cox=14), 
+               alpha=0.5, fill="lightgray") +
+  #geom_stripes(coeffs, Pretty) +
+  geom_vline(aes(xintercept=1), color="gray", size=1) +
+  ggstance::geom_linerangeh(position=position_dodge(width=1))+#, size=0.2) +
+  geom_point(#aes(), 
+             #fill=NA, 
+             shape=21,
+             size=1.5,
+             position=position_dodge(width=1))+
+             #key_glyph=ggstance::draw_key_pointrangeh) +
+  labs(x="Odds ratio", y="Standardized variables") +
+  facet_grid( ~ population,
+             #rows = vars(model), cols = vars(phenotype),
+             scales = "fixed", space = "free", shrink=TRUE, drop=FALSE) +
+  scale_colour_manual(values = cohort_colors[included_groups],
+                      labels = cohort_names[included_groups], na.value = NA, drop=FALSE) +
+  scale_fill_manual(guide="none",
+                    values = cohort_colors[included_groups],
+                      labels = cohort_names[included_groups], na.value = NA, drop=FALSE) +
+  guides(color = guide_legend(override.aes = list(shape = 16))) +  # Use filled circle in the legend instead of hollow
   scale_x_log10() +
   scale_y_discrete() +  # !!!!! This is important. Solves the problem with position_dodge2 and the order of rect and pointrange geoms !!!!!!
                          # Otherwise following error results: Error: Discrete value supplied to continuous scale
@@ -325,13 +399,48 @@ g <- tmp %>%
         panel.grid.major.y = element_blank(),
         panel.grid.minor.y = element_blank())
 if (save_figs) {
-  filename <- sprintf("%s/pdf/facet_forest.pdf", result_base)
+  filename <- sprintf("%s/pdf/fi_uk_cis.pdf", result_base)
   ggsave(filename=filename, plot=g, width = 180, height = 180, units="mm", dpi=300, scale=1.0, device="pdf")
 }
 g
 ```
 
-Quantify how often Cox-models have more significant variables than Bayes-models, considering only variables in common with logistic and Cox models.
+```{r FinnGen INTERVAL comparison faceted by demographic group}
+g <- tmp %>%
+  mutate(Group = fct_rev(Group)) %>%
+  ggplot(aes(x=Estimate, xmin=low, xmax=high, y=Pretty, color=population, fill=hollow_population))+
+  stat_stripes(aes(stripe=Pretty), #row_sizes=c(Bayes=21, Cox=14), 
+               alpha=0.5, fill="lightgray") +
+  #geom_stripes(coeffs, Pretty) +
+  geom_vline(aes(xintercept=1), color="gray", size=1) +
+  ggstance::geom_linerangeh(position=position_dodge(width=1))+#, size=0.2) +
+  geom_point(#aes(), 
+    #fill=NA, 
+    shape=21,
+    size=1.5,
+    position=position_dodge(width=1))+
+  #key_glyph=ggstance::draw_key_pointrangeh) +
+  # scale_fill_manual(guide = "none",
+  #                   values = cohort_colors[included_groups],
+  #                   labels = cohort_names[included_groups],
+  #                   na.value = NA, drop=FALSE) +
+  scale_fill_discrete(guide = "none", na.value = NA, drop=FALSE) +
+  scale_x_log10() +
+  guides(color = guide_legend(override.aes = list(shape = 16))) +  # Use filled circle in the legend instead of hollow
+  labs(x="Odds ratio", y="Standardized variables", color="Cohort") +
+  facet_wrap(~Group, labeller = as_labeller(cohort_names)) +
+  theme(legend.position="bottom",    
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank())
+
+if (save_figs) {
+  ggsave(filename="/tmp/b.png", plot=g, width = 180, height = 180, units="mm", dpi=300, scale=1.0, device="png")
+}
+g
+```
+
+
+## Quantify how often Cox-models have more significant variables than Bayes-models, considering only variables in common with logistic and Cox models.
 
 ```{r}
 tmp2 <- tmp %>% mutate(across(c(model, phenotype, Variable), as.factor)) %>%
@@ -360,31 +469,39 @@ cat(sprintf("The fraction of non-significant variables in deferral drops by %.1f
 
 ### Read summary stats
 
+```{r}
+deferral_gwas_filename   <- paste(base, "phewas-30k/results/saigeio/output/results.bin_S821_or_P821.all.summary_statistics.txt.gz",  sep="/")
+bd_hemoglobin_gwas_filename   <- paste(base, "phewas-30k/results/saigeio/output/results.hb_median.all.summary_statistics.txt.gz",  sep="/")
+non_bd_anemia_gwas_filename   <- paste(base, "summary-statistics/D3_ANAEMIA_IRONDEF.gz",  sep="/")
+ferritin_gwas_filename   <- paste(base, "summary-statistics/IronhomeostasisFerritinAllInterval_IasterDX_2018-11-06.wInfo.cl.txt.gz", sep="/")
+#hemoglobin_gwas_filename <- paste(base, "summary-statistics/four-columns-32888494-GCST90002384-EFO_0004509.h.tsv.gz", sep="/")
+hemoglobin_gwas_filename <- paste(base, "summary-statistics/hemoglobin.tsv.gz", sep="/")
+anemia_meta_filename     <- paste(base, "finngen-meta-r6/D3_ANAEMIA_IRONDEF_meta_out.tsv.gz", sep="/")
+
+
+input_columns <- tribble(~phenotype,   ~chr,        ~bp,     ~p,        ~snp,             ~rsid, ~beta, ~se, ~eaf,
+                 "hemoglobin", "hm_chrom", "hm_pos", "p_value", "hm_variant_id",  "hm_rsid", "beta", "standard_error", "effect_allele_frequency",
+                 "ferritin",   "Chr",      "PosB38", "P",       "SNP",            "UK10Kid", "Beta", NA, "eaFrq",
+                 "anemia",     "#CHR",     "POS",    "all_inv_var_meta_p", "SNP", "FINNGEN_rsids",  "all_inv_var_meta_beta", "all_inv_var_meta_sebeta", NA,  
+                 "deferral",   "CHR",      "POS",    "p.value", "SNPID",          "SNPID", "BETA", "SE", "AF_Allele2",    # No rsid available
+                 "non_bd_anemia","CHR",    "POS",    "p.value", "SNPID",          "SNPID", "BETA", "SE", "AF_Allele2",    # No rsid available
+                 "bd_hemoglobin","CHR",    "POS",    "p.value", "SNPID",          "SNPID", "BETA", "SE", "AF_Allele2")    # No rsid available
+
+```
+
+
 ```{r Load and filter the GWAS results}
 filename <- paste(result_base, "filtered_gwases.rds", sep="/")
+unfiltered_filename <- paste(result_base, "unfiltered_gwases.rds", sep="/")
+
 if (recompute_manhattan | !file.exists(filename)) {
-  deferral_gwas_filename   <- paste(base, "phewas-30k/results/saigeio/output/results.bin_S821_or_P821.all.summary_statistics.txt.gz",  sep="/")
-  bd_hemoglobin_gwas_filename   <- paste(base, "phewas-30k/results/saigeio/output/results.hb_median.all.summary_statistics.txt.gz",  sep="/")
-  non_bd_anemia_gwas_filename   <- paste(base, "summary-statistics/D3_ANAEMIA_IRONDEF.gz",  sep="/")
-  ferritin_gwas_filename   <- paste(base, "summary-statistics/IronhomeostasisFerritinAllInterval_IasterDX_2018-11-06.wInfo.cl.txt.gz", sep="/")
-  hemoglobin_gwas_filename <- paste(base, "summary-statistics/four-columns-32888494-GCST90002384-EFO_0004509.h.tsv.gz", sep="/")
-  anemia_meta_filename     <- paste(base, "finngen-meta-r6/D3_ANAEMIA_IRONDEF_meta_out.tsv.gz", sep="/")
-  
-  
-  input <- tribble(~phenotype,   ~chr,        ~bp,     ~p,        ~snp,             ~rsid,
-                   "hemoglobin", "hm_chrom", "hm_pos", "p_value", "hm_variant_id",  "hm_rsid",
-                   "ferritin",   "Chr",      "PosB38", "P",       "SNP",            "UK10Kid",
-                   "anemia",     "#CHR",     "POS",    "all_inv_var_meta_p", "SNP", "FINNGEN_rsids",     
-                   "deferral",   "CHR",      "POS",    "p.value", "SNPID",          "SNPID",    # No rsid available
-                   "non_bd_anemia","CHR",    "POS",    "p.value", "SNPID",          "SNPID",    # No rsid available
-                   "bd_hemoglobin","CHR",    "POS",    "p.value", "SNPID",          "SNPID")    # No rsid available
   #n_max <- 1000000
   n_max <- Inf
   p_threshold <- 1e-4
   
   get_variable_names <- function(input, phenotype) {
     variables <- input %>% filter(phenotype=={{phenotype}}) %>% select(-c(phenotype, rsid)) %>% unlist()
-    variables
+    variables[!is.na(variables)]
   }
   # Save memory by dropping unneeded columns
   choose_columns <- function(df, input, phenotype) {
@@ -395,13 +512,13 @@ if (recompute_manhattan | !file.exists(filename)) {
   }
 
   bd_hemoglobin_gwas <- read_delim(bd_hemoglobin_gwas_filename, delim=" ", col_types = cols(), 
-                              col_select = get_variable_names(input, "bd_hemoglobin"), n_max = n_max)
+                              col_select = get_variable_names(input_columns, "bd_hemoglobin"), n_max = n_max)
   #bd_hemoglobin <- choose_columns(bd_hemoglobin_meta, input, "bd_hemoglobin")
   bd_hemoglobin_gwas <- bd_hemoglobin_gwas %>% drop_na()
   gc()
   
   non_bd_anemia_gwas <- read_delim(non_bd_anemia_gwas_filename, delim="\t", col_types = cols(), 
-                              col_select = get_variable_names(input, "non_bd_anemia"), n_max = n_max)
+                              col_select = get_variable_names(input_columns, "non_bd_anemia"), n_max = n_max)
   #bd_hemoglobin <- choose_columns(bd_hemoglobin_meta, input, "bd_hemoglobin")
   non_bd_anemia_gwas <- non_bd_anemia_gwas %>% 
     drop_na() %>% 
@@ -409,27 +526,34 @@ if (recompute_manhattan | !file.exists(filename)) {
                            TRUE          ~ as.numeric(str_remove(chr, "chr"))))
   gc()
   
-  anemia_meta <- read_delim(anemia_meta_filename, delim="\t", col_types = cols(), n_max = n_max)
-  anemia_meta <- choose_columns(anemia_meta, input, "anemia")
+  anemia_meta <- read_delim(anemia_meta_filename, delim="\t", col_types = cols(), 
+                            col_select = get_variable_names(input_columns, "anemia"),
+                            n_max = n_max)
+  #anemia_meta <- choose_columns(anemia_meta, input_columns, "anemia")
   anemia_meta <- anemia_meta %>% drop_na()
   gc()
   
-  hemoglobin_gwas <- read_delim(hemoglobin_gwas_filename, delim="\t", col_types = cols(), n_max = n_max)
-  hemoglobin_gwas <- choose_columns(hemoglobin_gwas, input, "hemoglobin")
+  hemoglobin_gwas <- read_delim(hemoglobin_gwas_filename, delim="\t", col_types = cols(), 
+                                col_select = get_variable_names(input_columns, "hemoglobin"), n_max = n_max)
+  #hemoglobin_gwas <- choose_columns(hemoglobin_gwas, input_columns, "hemoglobin")
   hemoglobin_gwas <- hemoglobin_gwas %>% 
     drop_na() %>% 
     mutate(chr = case_when(chr == "X" ~ 23,
                            TRUE ~ as.numeric(chr))) %>% 
-    filter(p > 0)  # There are 2494 rows with zero p-value. After this the smallest p-value is 1e-306
+    filter(p > 0)  %>% # There are 2494 rows with zero p-value. After this the smallest p-value is 1e-306
+    arrange(chr, bp)
   gc()
   
-  deferral_gwas <- read_delim(deferral_gwas_filename, delim = " ", col_types = cols(), n_max = n_max) # Last parameter to get rid of printing of guessed col types
-  deferral_gwas   <- choose_columns(deferral_gwas, input, "deferral")
+  deferral_gwas <- read_delim(deferral_gwas_filename, delim = " ", col_types = cols(), 
+                              col_select = get_variable_names(input_columns, "deferral"), n_max = n_max) # Last parameter to get rid of printing of guessed col types
+  #deferral_gwas   <- choose_columns(deferral_gwas, input_columns, "deferral")
   gc()
   
-  ferritin_gwas <- read_delim(ferritin_gwas_filename, delim = "\t", col_types = cols(), n_max = n_max)
-  ferritin_gwas <- choose_columns(ferritin_gwas, input, "ferritin")
+  ferritin_gwas <- read_delim(ferritin_gwas_filename, delim = "\t", col_types = cols(), 
+                              col_select = get_variable_names(input_columns, "ferritin"), n_max = n_max)
+  #ferritin_gwas <- choose_columns(ferritin_gwas, input_columns, "ferritin")
   ferritin_gwas <-  ferritin_gwas %>% mutate(chr = as.numeric(str_remove(chr, "chr")))
+                                             
   gc()
   
   L <- list(hemoglobin=hemoglobin_gwas, ferritin=ferritin_gwas, anemia=anemia_meta, deferral=deferral_gwas)
@@ -441,8 +565,11 @@ if (recompute_manhattan | !file.exists(filename)) {
   map(all_gwas_list, nrow)
   
   saveRDS(all_gwas_list, filename)
+  
+  saveRDS(L, unfiltered_filename)
 } else {
   all_gwas_list <- readRDS(filename)
+  L <- readRDS(unfiltered_filename)
 }
 
 all_gwas <- bind_rows(all_gwas_list, .id="phenotype")
@@ -456,6 +583,113 @@ significant <- map(all_gwas_list, function(df) {df %>% filter(p < 5e-8)})
 #all_gwas %>% group_by(phenotype, chr) %>% summarise(is_sorted = ! is.unsorted(bp)) %>% filter(! is_sorted)
 ```
 
+### SNP overlaps
+
+```{r Compute number of snips of GWASes and overlaps}
+# This version has uniform snp names:
+cleaned_unfiltered_filename <- paste(result_base, "cleaned_unfiltered_gwases.rds", sep="/")
+L2 <- readRDS(cleaned_unfiltered_filename)
+# These snips are the input to PRS-CS
+gwas_snip_names <- L2 %>%
+  discard_at("anemia") %>%  # I run out of memory, if I try to include this as well.
+  map(function(df) { 
+    df %>% 
+      #head(n=1000) %>% 
+      pull(snp)
+  })
+
+filename <- "~/FRCBS/results_for_anemia_and_deferral_article/pdf/upset_gwa_snips.pdf"
+# For some reason, these don't work!
+# But they work when evaluated in the console!
+#cairo_pdf(filename, width = 180/25.4)
+pdf(filename, width = 180/25.4)
+#png(filename, width = 180/25.4)
+u <- UpSetR::upset(UpSetR::fromList(gwas_snip_names))#, order.by = "freq", 
+                       set_size.show=TRUE,
+                       empty.intersections = TRUE,
+                       set_size.scale_max = 50000, # This doesn't help to explain where donors from eProgesa disappear
+                       nintersects = NA   # Show all intersections. Does not work. Six seems to be the maximum
+                       # number of intersections
+                       )
+print(u)
+dev.off()
+```
+
+```{r}
+prefix <- "~/proj/blood_health_phewas/prs"
+helper <- function(filename) {
+  df <- read_tsv(filename, #n_max=1000, 
+                 col_names=c("chr", "snp", "pos", "ref", "alt", "weight"),
+                 show_col_types = FALSE)
+  print(nrow(df))
+  df <- df %>% select(-snp) %>% distinct()
+  print(nrow(df))
+  df %>% 
+    mutate(snp = sprintf("%i_%i_%s_%s", chr, pos, ref, alt)) %>%
+    pull(snp)
+}
+# These snips are the output from PRS-CS
+prs_snip_names <- tribble(
+  ~phenotype, ~filename,
+  "non_bd_anemia", sprintf("%s/D3_ANAEMIA_IRONDEF.weights.txt", prefix),
+  "hemoglobin", sprintf("%s/32888494-GCST90002384-EFO_0004509.h.tsv.weights.txt", prefix),  
+  "ferritin", sprintf("%s/IronhomeostasisFerritinAllInterval_IasterDX_2018-11-06.wInfo.cl.txt.weights.txt", prefix)
+)
+prs_snip_names <- prs_snip_names %>%
+  mutate(snps = map(filename, helper))
+prs_snip_names <- prs_snip_names %>% select(-filename) %>% deframe()
+```
+
+```{r}
+filename <- "~/FRCBS/results_for_anemia_and_deferral_article/pdf/upset_prs_snips.pdf"
+# For some reason, these don't work!
+# But they work when evaluated in the console!
+pdf(filename, width = 180/25.4)
+UpSetR::upset(UpSetR::fromList(prs_snip_names))
+dev.off()
+```
+
+```{r Compute genomic inflation factors}
+# http://genometoolbox.blogspot.com/2014/08/how-to-calculate-genomic-inflation.html
+# https://www.mv.helsinki.fi/home/mjxpirin/GWAS_course/material/GWAS6.html
+compute_gif <- function (pvalue) {
+  # For p-values, calculate chi-squared statistic
+  chisq <- qchisq(1 - pvalue, 1)
+  
+  # Calculate lambda gc (λgc)
+  median(chisq)/qchisq(0.5, 1)
+}
+# for (phenotype in c("hemoglobin", "ferritin",   "anemia",     "deferral")) {
+#   cat(sprintf("Genomic inflation factor for %s is %f\n", phenotype, compute_gif(L[[phenotype]]$p)))  
+# }
+```
+
+```{r Create QQ plots}
+for (phenotype in c("hemoglobin", "ferritin",   "anemia",     "deferral")) {
+  filename <- sprintf("~/FRCBS/anemia_and_deferral_article/png/qq_%s.png", phenotype)
+  png(filename, height= 15, width= 20, units="cm", res=300)
+  lambda <- compute_gif(L[[phenotype]]$p)
+  lambda2 <- signif(lambda, 3)
+  qq(L[[phenotype]]$p,
+     sub = bquote(~lambda == .(lambda2)))
+  title(phenotype)
+  dev.off()
+}
+```
+
+```{r Just testing, eval=FALSE}
+phenotype <- "deferral"
+tmp3 <- L[[phenotype]] %>% head(1000)
+lambda2 <- compute_gif(tmp3$p)
+#qq(tmp3$p, sub = expression(paste(lambda, signif(lambda2,2))))
+x <- signif(lambda2,3)
+x2 <- sprintf("lambda %.3f", lambda2)
+qq(tmp3$p, sub = bquote(~lambda == .(x)))
+# The following creates a 2x2 tile of the plots. Run in shell.
+# montage qq_anemia.png qq_hemoglobin.png qq_ferritin.png qq_deferral.png -mode concatenate -tile 2x2 qq_all.png
+```
+
+
 ```{r Function to find gene name for a snip}
 # We use gene names extracted by plink people, see
 # https://www.cog-genomics.org/plink/1.9/resources#genelist
@@ -465,7 +699,7 @@ if (! file.exists(gene_filename)) {
   cmd <- sprintf("wget -O %s %s", gene_filename, gene_url)
   system(cmd)
 }
-get_genes <- function(df) {
+get_genes_plink <- function(df) {
   orig_names <- names(df)
   df <- df %>% rename(CHR=chr, BP=bp)
   write_delim(df, "/tmp/tmp.txt", delim = " ")
@@ -480,56 +714,8 @@ get_genes <- function(df) {
 ```
 
 ```{r Get gene annotations}
-use_vep <- TRUE
-if (use_vep) {
-  if (recompute_annotation) {
-    header <- str_split("Allele|Consequence|IMPACT|SYMBOL|Gene|Feature_type|Feature|BIOTYPE|EXON|INTRON|HGVSc|HGVSp|cDNA_position|CDS_position|Protein_position|Amino_acids|Codons|Existing_variation|DISTANCE|STRAND|FLAGS|SYMBOL_SOURCE|HGNC_ID|CLIN_SIG|SOMATIC|PHENO", "\\|")[[1]]
-    snips_to_be_identified <- all_gwas %>% 
-      filter(p < 5e-8) %>%
-      #head(100) %>%   # for testing purposes
-      separate(snp, c("dummy1","dummy2","Allele1","Allele2"), sep="[_:]", remove=FALSE) %>% 
-      select(CHR=chr, POS=bp, ID=snp, Allele1, Allele2)
-    genes2 <- get_annotations(snips_to_be_identified)
-    genes3 <- genes2 %>% 
-      mutate(Annotation = str_remove(Annotation, "^CSQ=")) %>% 
-      separate_rows(Annotation, sep=",") %>% 
-      separate(Annotation, 
-               #sprintf("X%i", 1:26),
-               header,
-               sep="\\|")
-  } else {
-    genes3 <- readRDS(sprintf("%s/parsed_annotation.rds", result_base))
-  }
-  genes <- genes3 %>% 
-    select(chr=CHR, bp=POS, gene=SYMBOL) %>% 
-    distinct() %>%
-    filter(gene != "")
-  # These are without names:
-  x1 <- significant$hemoglobin %>% filter(chr==4) %>% slice_min(order_by=p, n=1)
-  x2 <- significant$ferritin %>% filter(chr==6) %>% slice_min(order_by=p, n=1)
-  x3 <- significant$ferritin %>% filter(chr==1) %>% slice_min(order_by=p, n=1)
-  # Use the names of the closest snips for them
-  y1 <- closest_snip(genes, x1)
-  y2 <- closest_snip(genes, x2)
-  y3 <- closest_snip(genes, x3)
-  genes <- genes %>% 
-    add_row(chr=x1$chr, bp=x1$bp, gene=y1$gene) %>%
-    add_row(chr=x2$chr, bp=x2$bp, gene=y2$gene) %>%
-    add_row(chr=x3$chr, bp=x3$bp, gene=y3$gene)
-  genes_unique <- genes %>%
-    group_by(chr, bp) %>% 
-    slice_head(n=1) %>%  # Just select the first gene name for the position. This is quite random.
-    ungroup()
-} else {  # use plink
-  snips_to_be_identified <- all_gwas %>% filter(p < 5e-8) %>% select(chr, bp) %>% distinct()
-  genes <- get_genes(snips_to_be_identified)
-  genes <- genes %>% select(-size)
-}
-add_gene_names <- function(df) {
-  df %>% left_join(genes, by=c("chr", "bp")) %>%
-    replace_na(list(gene=""))
-#    replace_na(list(gene="<noname>"))
-}
+
+genes <- get_gene_names(all_gwas)
 ```
 
 
@@ -582,7 +768,7 @@ gg.manhattan <- function(df, threshold, sig, sugg, col, ylims, title, annotate=N
     to_annotate <- inner_join(df.tmp, annotate, by=c("phenotype", "chr", "bp", "p")) #%>%
     #  mutate(phenotype = factor(phenotype, levels = levels(df.tmp)))
     #print(to_annotate)
-    g <- g + geom_point(data = to_annotate, color = "black", size=3, fill=NA, shape=21)
+    g <- g + geom_point(data = to_annotate, color = "black", size=3, fill=NA, shape=21)  # hollow circles
     g <- g + geom_text_repel(data = to_annotate, mapping=aes(label=gene), color = "black", size=3)
   }
     
@@ -637,86 +823,48 @@ g
 ### Lead snips
 
 ```{r}
-find_lead_snips <- function(tmp, radius=1e6) {
-  #tmp <- L2$deferral
-  # Slide a 2*size bp window over the dataframe rows. Returns a dataframe that
-  # contains for each window a row with minimum p value
-  find_lead_snips_helper <- function(df, key) {
-    #size <- 1e6
-    lead_snips <- slide_index_dfr(df, df$bp, ~slice_min(.x, order_by = p, n=1, with_ties = FALSE), 
-                                  .before=radius, .after=radius)
-    lead_snips <- lead_snips %>% distinct()
-    lead_snips$chr <- key$chr
-    return(lead_snips)
-  }
-  find_lead_snips_better <- function(df, key) {
-    chr <- key$chr
-    #print(chr)
-    min_p <- df[1, "p"]
-    min_pos <- df[1, "bp"]
-    reported <- FALSE
-    result <- c()
-    for (i in 1:nrow(df)) {
-      current_pos <- df[i, "bp"]
-      current_p <- df[i, "p"]
-      if (current_pos - min_pos > radius) {
-        result <- c(result, min_pos)
-        #reported <- TRUE
-        min_p <- current_p
-        min_pos <- current_pos
-      } else if (current_p < min_p) {
-        min_p <- current_p
-        min_pos <- current_pos
-        #reported <- FALSE
-      }
-    }
-    result <- c(result, min_pos)
-    #print(result)
-    lead_snips <- df %>% filter(bp %in% result) %>% mutate(chr=chr)
-    return(lead_snips)    
-  }
-  find_lead_snips_best <- function(df, key) {
-    df$minp <- slide_index_dbl(df, df$bp, ~min(.x$p), .before=radius, .after=radius)
-    df$chr <- key$chr
-    return(df %>% filter(p == minp))
-  }
-  #tmp2 <- tmp %>% filter(chr==1)
-  #df <- find_lead_snips(tmp2)
-  res <- tmp %>% filter(p < 5e-8) %>% group_by(chr) %>% group_map(find_lead_snips_best) %>% bind_rows() %>%
-    relocate(chr)
-  res
-}
+
 radius <- 3e6
 lead_snips_deferral <- find_lead_snips(all_gwas_list$deferral, radius=radius)
 lead_snips_anemia <- find_lead_snips(all_gwas_list$anemia, radius=radius)
 lead_snips_ferritin <- find_lead_snips(all_gwas_list$ferritin, radius=radius)
 lead_snips_hemoglobin <- find_lead_snips(all_gwas_list$hemoglobin, radius=radius)
-lead_snips_non_bd_anemia <- find_lead_snips(all_gwas_list$non_bd_anemia, radius=radius)
-lead_snips_bd_hemoglobin <- find_lead_snips(all_gwas_list$bd_hemoglobin, radius=radius)
+#lead_snips_non_bd_anemia <- find_lead_snips(non_bd_anemia_gwas, radius=radius)
+#lead_snips_bd_hemoglobin <- find_lead_snips(bd_hemoglobin_gwas, radius=radius)
 
 lead_snips <- bind_rows(deferral=lead_snips_deferral, anemia=lead_snips_anemia, 
                         ferritin=lead_snips_ferritin, hemoglobin=lead_snips_hemoglobin, 
                         .id="phenotype")
+```
+
+### Combined and labeled manhattan plot
+
+```{r Create labeled Manhattan plot}
 phenotypes <- c("hemoglobin", "ferritin", "anemia", "deferral")
 tmp <- add_gene_names(lead_snips) %>%
-  mutate(phenotype = factor(phenotype, levels=phenotypes))
+  mutate(phenotype = factor(phenotype, 
+                            levels=c("hemoglobin", "ferritin", "anemia", "deferral"),
+                            labels = c("Hemoglobin", "Ferritin", "IDA", "Hb-deferral")))
 #
 data <- bind_rows(all_gwas_list[phenotypes], .id="phenotype") %>%
-               mutate(phenotype = factor(phenotype, phenotypes))
+  mutate(phenotype = factor(phenotype, 
+                            levels=c("hemoglobin", "ferritin", "anemia", "deferral"),
+                            labels = c("Hemoglobin", "Ferritin", "IDA", "Hb-deferral")))
+
 article_names <- tribble(
   ~phenotype, ~x, ~y, ~label,
-  "hemoglobin", 0, 290, "Vuckovic-2020",
-  "ferritin", 0, 90, "Bell-2021") %>%
-  mutate(phenotype = factor(phenotype, levels=phenotypes))
+  "Hemoglobin", 0, 290, "Vuckovic-2020",
+  "Ferritin", 0, 90, "Bell-2021") %>%
+  mutate(phenotype = factor(phenotype, levels=c("Hemoglobin", "Ferritin", "IDA", "Deferral")))
 g <- gg.manhattan(data, 
              threshold=0, sig=5e-8, sugg=5e-8, col=mypalette, ylims=NULL, title=NULL, annotate = tmp) +
   geom_text(data=article_names, mapping=aes(x=x, y=y, label=label), size=5, hjust=0, inherit.aes = FALSE) + 
   scale_y_continuous(expand = expansion(add = c(0, 10))) + # Add some padding so that text and circles don't get cut out
-  lemon::facet_rep_grid(phenotype ~., scale="free_y", repeat.tick.labels = TRUE)
+  lemon::facet_rep_grid(phenotype ~., scale="free_y", repeat.tick.labels = TRUE) # Show x-axis labels for each panel separately
   # annotate("text", phenotype="hemoglobin", x = 2e8, y = 300, label = "Vuckovic-2020") +
   # annotate("text", phenotype="ferritin", x = 2e8, y = 180, label = "Bell-2021")
 if (save_figs)
-  ggsave("~/FRCBS/anemia_and_deferral_article/pdf/labeled_manhattan_plots.pdf", g, width = 180, units="mm")
+  ggsave("~/FRCBS/results_for_anemia_and_deferral_article/pdf/labeled_manhattan_plots.pdf", g, width = 180, units="mm")
 g
 # gg.manhattan(L2$deferral, threshold=0, sig=5e-8, sugg=5e-8, hlight=lead_snips_deferral$snp, col=mypalette, ylims=NULL, title=NULL)
 # gg.manhattan(L2$anemia, threshold=0, sig=5e-8, sugg=5e-8, hlight=lead_snips_anemia$snp, col=mypalette, ylims=NULL, title=NULL)
@@ -807,7 +955,7 @@ Radius 3Mbps seems to give better overlaps than the radius 0.5Mbp.
 ### Blood donor hemoglobin and non-blood donor anemia
 
 ```{r}
-df <- bind_rows(bd_hemoglobin=all_gwas_list$bd_hemoglobin, non_bd_anemia=all_gwas_list$non_bd_anemia, .id="phenotype") #%>% 
+df <- bind_rows(bd_hemoglobin=bd_hemoglobin_gwas, non_bd_anemia=non_bd_anemia_gwas, .id="phenotype") #%>% 
   # mutate(phenotype = factor(phenotype, levels=c("bd_hemoglobin", "non_bd_anemia"),
   #                           labels = c("Bd hemoglobin", "Non bd anemia")))
 lead_snips2 <- bind_rows(non_bd_anemia=lead_snips_non_bd_anemia, bd_hemoglobin=lead_snips_bd_hemoglobin, .id="phenotype") %>%
@@ -816,15 +964,16 @@ g <- gg.manhattan(df, threshold=0, sig=5e-8, sugg=5e-8, col=mypalette, ylims=NUL
 g <- g + lemon::facet_rep_grid(phenotype ~., scale="free_y", repeat.tick.labels = TRUE)
 g
 ```
+
 ```{r}
 snip <- lead_snips_non_bd_anemia
 non_bd_anemia_peak <- closest_snip(all_gwas_list$non_bd_anemia, snip, radius)
 bd_hemoglobin_center <- closest_snip(lead_snips_bd_hemoglobin, snip)
 bd_hemoglobin_peak <- closest_snip(all_gwas_list$bd_hemoglobin, bd_hemoglobin_center, radius)
 
-non_bd_anemia_genes2 <- get_genes(non_bd_anemia_peak)
+non_bd_anemia_genes2 <- get_genes_plink(non_bd_anemia_peak)
 non_bd_anemia_genes <- non_bd_anemia_genes2 %>% pull(gene) %>% unique
-bd_hemoglobin_genes2 <- get_genes(bd_hemoglobin_peak)
+bd_hemoglobin_genes2 <- get_genes_plink(bd_hemoglobin_peak)
 bd_hemoglobin_genes <- bd_hemoglobin_genes2 %>% pull(gene) %>% unique
 
 cat(sprintf("Gene overlap between non bd anemia (peak chr %i, bp %i) and bd hemoglobin (peak chr %i, bp %i) is %.2f%%\n", 
@@ -859,49 +1008,68 @@ tmp
 add_gene_names(significant$bd_hemoglobin) %>% filter(str_detect(gene, regex("tmprss6|hfe", ignore_case = TRUE)))
 ```
 
-## All tables into Excel file
 
-```{r Description of variables}
-description <- descript %>%
-  filter(! Variable %in% c("donor", "previous_Hb_def", "consecutive_deferrals", "Hb_first", "height", 
-                           #"weight",
-                           "bmi",
-                           "RNF43_mutant", "female", "sex",
-                           "prs",  "FERRITIN_FIRST", "FERRITIN_LAST", "one_deferral", "label")) %>%
-  select(Variable=Pretty, Type, Description=Explanation) %>%
-  arrange(Variable)
+## Genotype distributions
+
+```{r Genotype distributions}
+# Hb-deferral
+filename <- sprintf("%s/table/deferral_genotype_distribution.tsv", result_base)
+deferral_genotype_distribution <- read_tsv(filename)
+g <- deferral_genotype_distribution %>% 
+  pivot_longer(cols=c(case_freq, control_freq), values_to = "frequency", names_to = "status") %>% 
+  mutate(variable = fct_relevel(variable, ~ str_sort(., numeric=TRUE))) %>%
+  mutate(status = str_replace(status, "_freq", "")) %>%
+  ggplot(aes(x=dosage, y=frequency, fill=status)) +
+  geom_col(position="dodge") +
+  facet_grid(~variable)
+if (save_figs) {
+  filename <- sprintf("%s/pdf/deferral_genotype_distributions.pdf", result_base)
+  ggsave(filename=filename,  g, width = 180,  height=90, units="mm", dpi=300, scale=1.0, device="pdf")
+}
+
+# IDA
+filename <- sprintf("%s/table/anemia_genotype_distribution.tsv", result_base)
+anemia_genotype_distribution <- read_tsv(filename)
+g <- anemia_genotype_distribution %>% 
+  pivot_longer(cols=c(case_freq, control_freq), values_to = "frequency", names_to = "status") %>% 
+  mutate(variable = fct_relevel(variable, ~ str_sort(., numeric=TRUE))) %>%
+  mutate(status = str_replace(status, "_freq", "")) %>%
+  ggplot(aes(x=dosage, y=frequency, fill=status)) +
+  geom_col(position="dodge") +
+  facet_grid(~variable)
+if (save_figs) {
+  filename <- sprintf("%s/pdf/anemia_genotype_distributions.pdf", result_base)
+  ggsave(filename=filename,  g, width = 180,  height=90, units="mm", dpi=300, scale=1.0, device="pdf")
+}
+
+# IDA UK
+filename <- sprintf("%s/table/anemia_genotype_distribution_uk.tsv", result_base)
+anemia_genotype_distribution_uk <- read_tsv(filename)
+g <- anemia_genotype_distribution_uk %>% 
+  pivot_longer(cols=c(case_freq, control_freq), values_to = "frequency", names_to = "status") %>% 
+  mutate(variable = fct_relevel(variable, ~ str_sort(., numeric=TRUE))) %>%
+  mutate(status = str_replace(status, "_freq", "")) %>%
+  ggplot(aes(x=dosage, y=frequency, fill=status)) +
+  geom_col(position="dodge") +
+  facet_grid(~variable)
+if (save_figs) {
+  filename <- sprintf("%s/pdf/anemia_genotype_distributions_uk.pdf", result_base)
+  ggsave(filename=filename,  g, width = 180,  height=90, units="mm", dpi=300, scale=1.0, device="pdf")
+}
+
 ```
 
 
-
-```{r Four snips}
-filename <- paste(result_base, "table", "anemia_meta_top_four.tsv", sep="/")
-anemia_meta <- read_tsv(filename)
-anemia_meta <- anemia_meta %>%
-  select(CHR=chr, POS=pos, SNP=rsids, REF=ref, EA=alt, EAF=maf, OR=beta, `P-value`=pval, `Nearest gene`=nearest_genes) %>%
-  mutate(OR=exp(OR)) %>% 
-  arrange(CHR)
-```
-
-```{r Read other article tables in}
-filename <- paste(result_base, "table", "summary_stat_sizes.tsv", sep="/")
-summary_stat_sizes <- read_tsv(filename, show_col_types = FALSE)
-filename <- paste(result_base, "table", "group_sizes.tsv", sep="/")
-group_sizes <- read_tsv(filename, show_col_types = FALSE)
-filename <- paste(result_base, "table", "deferral_all_genetic_risks.tsv", sep="/")
-deferral_genetic_risks <- read_tsv(filename, show_col_types = FALSE) %>% relocate(mean, .after="group")
-```
-
-
-
+## Correlation of anemia
 
 ```{r}
-filename <- paste(result_base, "table", "all_tables.xlsx", sep="/")
-dfs <- list(Description=description, `Anemia meta-analysis SNPs`=anemia_meta,
-            `FinnGen data sizes`=group_sizes, `Summary stats`=summary_stat_sizes,
-            `Total genetic risk of deferral`=deferral_genetic_risks)
-openxlsx::write.xlsx(dfs, file = filename, overwrite=TRUE)#, sheetName = "description")
-
+filename <- sprintf("%s/anemia_correlations.tsv", table_path)
+c2 <- read_tsv(filename)
+c <- c2 %>% column_to_rownames("Phenotype")
+filename <- sprintf("%s/pdf/anemia_correlations.pdf", result_base)
+if (save_figs) cairo_pdf(filename)
+corrplot::corrplot(as.matrix(c))
+if (save_figs) dev.off()
 ```
 
 
@@ -909,15 +1077,18 @@ openxlsx::write.xlsx(dfs, file = filename, overwrite=TRUE)#, sheetName = "descri
 
 ```{r}
 # Converts column names of a dataframe 'df' to pretty format using dataframe 'description'.
-to_pretty <- function(df, description) {
-  old_names <- colnames(df)
-  conversion <- description %>% filter(Variable %in% all_of(old_names)) %>% select(Pretty, Variable) %>% deframe()
-  #print(conversion)
-    #message(sprintf("descript names: %s\n", paste(description$Variable, collapse=" ")))
-  #message(sprintf("old_names: %s\n", paste(old_names, collapse=" ")))
-  #message(sprintf("new_names: %s\n", paste(new_names, collapse=" ")))
-  df %>% rename(!!!conversion)
-}
+# to_pretty <- function(df, description) {
+#   old_names <- colnames(df)
+#   conversion <- description %>% filter(Variable %in% all_of(old_names)) %>% select(Pretty, Variable) %>% deframe()
+#   #print(conversion)
+#     #message(sprintf("descript names: %s\n", paste(description$Variable, collapse=" ")))
+#   #message(sprintf("old_names: %s\n", paste(old_names, collapse=" ")))
+#   #message(sprintf("new_names: %s\n", paste(new_names, collapse=" ")))
+#   df %>% rename(!!!conversion)
+# }
+```
+
+```{r Sex stratified histograms}
 double_summary_plotter <- function(male_df, female_df, variable_descriptions, geom = "freqpoly", breaks=waiver(), ncol=NULL) {
   df <- bind_rows(male=male_df, female=female_df, .id="Sex")
   #print(df, 5)
@@ -925,7 +1096,8 @@ double_summary_plotter <- function(male_df, female_df, variable_descriptions, ge
     mutate(across(where(is.logical), as.integer)) %>%
     #keep(is.numeric(col) %>%
     select(where(is.numeric) | Sex) %>%
-    to_pretty(variable_descriptions) %>%
+    #to_pretty(variable_descriptions) %>%
+    pretty_col_names(variable_descriptions) %>%
     #gather() %>%
     pivot_longer(!Sex) #%>%
     #mutate(name = factor(name, levels=variable_descriptions$Pretty))   # Don't sort alphabetically
@@ -947,13 +1119,13 @@ double_summary_plotter <- function(male_df, female_df, variable_descriptions, ge
     g <- df %>%
       ggplot(aes(value, fill=Sex)) +
       facet_wrap(~ name, scales = "free", ncol=ncol) +
-      geom_histogram(position="dodge") +
+      geom_histogram(position="identity", alpha=0.8) +
       scale_x_continuous(breaks=breaks)
   } else if (geom=="hollow_histogram") {
     g <- df %>%
       ggplot(aes(value, color=Sex)) +
       facet_wrap(~ name, scales = "free", ncol=ncol) +
-      geom_histogram(fill=NA) +
+      geom_histogram(fill=NA, position="identity") +
       scale_x_continuous(breaks=breaks)
   } else {
     stop(sprintf("Unknow value for the geom parameter: %s", geom))
@@ -965,25 +1137,240 @@ double_summary_plotter <- function(male_df, female_df, variable_descriptions, ge
 ```
 
 
-```{r}
+```{r Variables histograms of males versus females}
 #source("~/FRCBS/Hb_predictor_container/src/common.R")
 base <- "~/FRCBS/blood_health_phewas/logistic_regression/"
 last_donations <- readRDS(sprintf("%s/last_donations.rds", base))
 variables_to_drop <- c("nb_donat_progesa", "nb_donat_outside", "donation_count",   "first_event", "female",
                        "bmi", "height",
                        "consecutive_deferrals", "Hb_first", "previous_Hb_def")
+```
+
+
+```{r Variables histograms of males versus females}
 male <- last_donations %>% filter(!female) %>% select(-any_of(variables_to_drop))
 female <- last_donations %>% filter(female) %>% select(-any_of(variables_to_drop))
-g <- double_summary_plotter(male, female, descript, geom="hollow_histogram", ncol=4) + 
+g <- double_summary_plotter(male, female, descript, geom="histogram", ncol=4) + 
   theme_gray(base_size = 9) +
   theme(legend.position="bottom",
         strip.text.x = element_text(size = 6)
         )
-ggsave(paste(result_base, "pdf/deferral_histogram.pdf", sep="/"), g, width = 180, units="mm")
+if (save_figs) {
+  filename <- paste(result_base, "pdf/deferral_histogram.pdf", sep="/")
+  ggsave(filename, g, width = 180, units="mm")
+}
 g
 ```
 
-# Genetic risks histogram
+```{r Sex and case-control stratified histograms}
+double_summary_plotter_case_control <- function(df, variable_descriptions, geom = "freqpoly", breaks=waiver(), ncol=NULL) {
+  #df <- bind_rows(case=case_df, control=control_df, .id="Status")
+  #print(df, 5)
+  df <- df %>%
+    mutate(across(where(is.logical), as.integer)) %>%
+    #keep(is.numeric(col) %>%
+    select(where(is.numeric) | c("Status", "sex")) %>%
+    pretty_col_names(variable_descriptions) %>%
+    #gather() %>%
+    pivot_longer(!c("Status", "Sex")) #%>%
+    #mutate(name = factor(name, levels=variable_descriptions$Pretty))   # Don't sort alphabetically
+  
+  #if (df %>% filter(name=="Days to previous full blood donation") %>% nrow() > 0) {
+  # Abbreviate this long variable name
+  if ("Days to previous full blood donation" %in% levels(df$name)) {
+    df <- df %>%
+      mutate(name = fct_recode(name, `Days to previous FB donation`="Days to previous full blood donation"))
+  }
+  
+  if (geom=="freqpoly") {
+    g <- df %>%
+      ggplot(aes(value, color=Status)) +
+      facet_wrap(~ name, scales = "free", ncol=ncol) +
+      geom_freqpoly() +
+      scale_x_continuous(breaks=breaks)
+  } else if (geom=="histogram") {
+    g <- df %>%
+      ggplot(aes(value, fill=Sex)) +
+      #facet_wrap(~ name, scales = "free", ncol=ncol) +
+      ggh4x::facet_grid2(rows=vars(name), cols=vars(Status), scales = "free", independent = TRUE) + 
+      geom_histogram(position="identity", alpha=0.8) +
+      scale_x_continuous(breaks=breaks)
+  } else if (geom=="hollow_histogram") {
+    g <- df %>%
+      ggplot(aes(value, color=Sex)) +
+      #facet_grid(name ~ Status, scales = "free") +
+      ggh4x::facet_grid2(rows=vars(name), cols=vars(Status), scales = "free", independent = TRUE) + 
+      geom_histogram(fill=NA) +
+      scale_x_continuous(breaks=breaks)
+  } else if (geom=="bar") {
+    g <- df %>%
+      mutate(value = factor(value, levels=0:2),
+             name = fct_relevel(name, function(v) str_sort(v, numeric=TRUE))) %>%
+      ggplot(aes(value, fill=Sex)) +
+      #facet_grid(name ~ Status, scales = "free") +
+      ggh4x::facet_grid2(rows=vars(name), cols=vars(Status), scales = "free", independent = TRUE) + 
+      geom_bar(position="dodge", width=0.5) +
+      scale_x_continuous(breaks=breaks)
+  } else {
+    stop(sprintf("Unknow value for the geom parameter: %s", geom))
+  }
+
+  return(g)
+}
+
+```
+
+
+
+```{r Variable histograms for the article}
+all <- last_donations %>% 
+  select(-any_of(variables_to_drop)) %>%
+  #drop_na() %>%
+  mutate(sex = fct_recode(gender, female="Women", male="Men") %>% fct_rev,
+         Status = factor(case_when(Hb_deferral ~ "case",
+                            TRUE        ~ "control")) ) #%>%
+  #select(sex, Status, age, hour)
+categorical_variables <- c(#"Hb_deferral", 
+                "smoking", "warm_season", "snp_1_169549811", "snp_6_32617727", "snp_15_45095352", "snp_17_58358769",
+                "Status", "sex")
+continuous_variables <- c("Hb",  
+                "days_to_previous_fb", "age",                 "previous_Hb",        
+                "year",                "hour",                "recent_donations",    "recent_deferrals",   
+                "prs_anemia",        "prs_ferritin",        "prs_hemoglobin",      "weight")
+all_variables <- c(categorical_variables, continuous_variables)
+```
+
+
+```{r Variable histograms for the article}
+# Categorical variables
+g1 <- double_summary_plotter_case_control(all %>% select(c("Status", "sex"), all_of(categorical_variables)) %>% drop_na(), 
+                                          descript, geom="bar", ncol=4) + 
+  theme_gray(base_size = 9) +
+  theme(legend.position="right",
+        legend.direction = "vertical",
+        strip.text.x = element_text(size = 6),
+        strip.text.y.right = element_text(angle = 0)
+        )
+
+# Continuous variables
+g2 <- double_summary_plotter_case_control(all %>% select(c("Status", "sex"), all_of(continuous_variables)) %>% drop_na(), 
+                                          descript, geom="histogram", ncol=4) + 
+  theme_gray(base_size = 9) +
+  theme(legend.position="right",
+        legend.direction = "vertical",
+        strip.text.x = element_text(size = 6),
+        strip.text.y.right = element_text(angle = 0)
+        )
+
+
+#scales1 <- unify_range_by_rows(g1)
+#gg1 <- g1 + ggh4x::facetted_pos_scales(scales1)
+gg1 <- g1 + scale_x_discrete(limit = factor(0:2))
+  
+scales2 <- unify_range_by_rows(g2)
+gg2 <- g2 + ggh4x::facetted_pos_scales(scales2)
+if (save_figs) {
+  ggsave(paste(result_base, "pdf/deferral_histogram_case_control1.pdf", sep="/"), gg1, width = 180, units="mm")
+  ggsave(paste(result_base, "pdf/deferral_histogram_case_control2.pdf", sep="/"), gg2, width = 180, units="mm")
+}
+
+gg1
+gg2
+```
+
+What years were the last donation attempts from?
+
+```{r}
+tab <- all %>% 
+  select(Hb_deferral, year) %>% 
+  table() 
+tab
+df2 <- tab %>% 
+  as_tibble() %>%
+  mutate(Hb_deferral = as.logical(Hb_deferral), year = as.integer(year)) 
+df <- df2 %>%
+  pivot_wider(names_from = Hb_deferral, values_from = n) %>%
+  rename(deferral="TRUE", accepted="FALSE") %>%
+  mutate(deferral_rate = deferral / (deferral + accepted))
+g1 <- df %>% ggplot(aes(year, deferral_rate)) +
+  geom_line() +
+  geom_point()
+g2 <- df2 %>% ggplot(aes(year, n, color=Hb_deferral)) +
+  geom_line() +
+  geom_point() + labs(y="Count")
+g1 / g2 + plot_annotation(title="Last donation attempts")
+```
+
+Yearly deferral rates over all donation attempts:
+
+```{r}
+donations <- readRDS("~/proj/blood_health_phewas/preprocessed_and_labeled.rds")
+```
+
+```{r}
+tmp_both <- donations %>% 
+  #head(10000) %>%
+  filter(year >= 1999) %>%
+  group_by(year) %>%
+  summarise(Hb_deferral = mean(Hb_deferral)) %>%
+  mutate(sex="both")
+
+tmp_stratified <- donations %>%
+  filter(year >= 1999) %>%
+  group_by(year, sex) %>%
+  summarise(Hb_deferral = mean(Hb_deferral), .groups="drop") 
+
+bind_rows(tmp_both, tmp_stratified) %>%
+  mutate(sex = factor(sex, levels=c("female", "both", "male"))) %>%
+  ggplot(aes(year, Hb_deferral, color=sex)) +
+  geom_line() +
+  geom_point() +
+  labs(title="All donations")
+```
+
+```{r Create table one}
+# Note that Fisher's exact test sometimes produces NA, depending on the data. This can in some cases be alleviated by
+# using the workspace parameter.
+# Example:
+# > m2 <- matrix(c(5039, 8094, 3177, 3422, 5565, 2365), ncol=2)
+# > m2
+#      [,1] [,2]
+# [1,] 5039 3422
+# [2,] 8094 5565
+# [3,] 3177 2365
+# > fisher.test(m2)
+# Error in fisher.test(m2) : 
+#   FEXACT error 6.  LDKEY=448 is too small for this problem,
+#   (ii := key2[itp=841] = 135712576, ldstp=13440)
+# Try increasing the size of the workspace and possibly 'mult'
+# > fisher.test(m2, workspace=10^6)
+# 
+# 	Fisher's Exact Test for Count Data
+# 
+# data:  m2
+# p-value = 0.01982
+# alternative hypothesis: two.sided
+# But when stratifying by both sex and Status, even workspace size 10^9 wasn't large enough.
+# Hence, I don't use Fisher's exact test here, even though some counts are quite low.
+x <- tableone::CreateTableOne(data=all %>% drop_na(), vars = all_variables, factorVars = categorical_variables,
+                    #argsExact = list(workspace = 10^9), # Even this wasn't large enough when stratifying by both sex and status
+               strata = c("sex", "Status"), 
+               addOverall = TRUE
+               )
+print(x, 
+      showAllLevels = TRUE,
+      nonnormal = setdiff(continuous_variables, c("prs_anemia", "prs_ferritin", "prs_hemoglobin"))) # Because the distributions are skewed
+      #exact = setdiff(categorical_variables, c("warm_season", "smoking", "Status", "sex"))
+m <- print(x, 
+           showAllLevels = TRUE,
+           nonnormal = setdiff(continuous_variables, c("prs_anemia", "prs_ferritin", "prs_hemoglobin")), # Because the distributions are skewed
+           printToggle = FALSE, noSpaces = TRUE           
+) %>% as_tibble(rownames="Variable")
+filename <- paste(result_base, "table", "deferral_tableone.tsv", sep="/")
+write_tsv(m, filename)
+```
+
+## Genetic risks histogram
 
 ```{r Genetic risk histogram for article}
 genetic_variables <- c("prs_anemia", "prs_ferritin", "prs_hemoglobin", "snp_1_169549811", "snp_6_32617727", 
@@ -998,14 +1385,14 @@ g <- deferral_genetic_risk_histograms %>%
   filter(group %in% c("male", "female"), method=="tdc_cox", stat=="median") %>%
   mutate(group=factor(group, levels=c("male", "female")),
          Variable=factor(name, levels=genetic_variables),
-         percentile=as.factor(percentile)) %>%
+         decile=as.factor(decile)) %>%
   to_pretty_long(descript) %>%
-  ggplot(aes(x=percentile, y=value, fill=Pretty)) +
+  ggplot(aes(x=decile, y=value, fill=Pretty)) +
   geom_col(position="stack") +
   #GGally::geom_stripped_cols() +
   facet_grid(~group) +
   #lims(y=c(-0.4, 0.8)) +
-  labs(x="Decile", y="Median", fill="Variable") +
+  labs(x="Decile", y="Median contribution", fill="Variable") +
   theme(#legend.position="bottom",    
     panel.grid.major.x = element_blank(),
     panel.grid.minor.x = element_blank())
@@ -1028,8 +1415,237 @@ if (save_figs)
 g2
 ```
 
+## All tables into Excel file
+
+```{r Description of variables}
+description <- descript %>%
+  filter(! Variable %in% c("donor", "previous_Hb_def", "consecutive_deferrals", "Hb_first", "height", 
+                           #"weight",
+                           "bmi",
+                           "RNF43_mutant", "female", "sex",
+                           "prs",  "FERRITIN_FIRST", "FERRITIN_LAST", "one_deferral", "label")) %>%
+  select(Variable=Pretty, Type, Description=Explanation) %>%
+  mutate(Variable = fct_relevel(Variable, ~str_sort(., numeric = TRUE))) %>% 
+  arrange(Variable)
+```
 
 
+
+```{r Four snips}
+filename <- paste(result_base, "table", "anemia_meta_top_four.tsv", sep="/")
+anemia_meta <- read_tsv(filename)
+anemia_meta <- anemia_meta %>%
+  select(CHR=chr, POS=pos, SNP=rsids, REF=ref, EA=alt, EAF=maf, OR=beta, `P-value`=pval, `Nearest gene`=nearest_genes) %>%
+  mutate(OR=exp(OR)) %>% 
+  arrange(CHR)
+```
+
+```{r Four snips separately from FG-UKBB meta-analysis}
+# helper <- function(df, c) {
+#   df %>% drop_na({{c}}) %>% arrange({{c}}) %>% group_by(CHR) %>% slice_min(n=1, order_by=.data[[c]]) %>% ungroup() %>%
+#     slice_min(n=4, order_by=.data[[c]])
+# }
+filename <- paste(result_base, "table", "anemia_meta_top_four2.tsv", sep="/")
+if (!file.exists(filename)) {
+  anemia_meta_filename     <- "~/FRCBS/blood_health_phewas/finngen-meta-r6/D3_ANAEMIA_IRONDEF_meta_out.tsv.gz"
+  cols <- c(CHR="#CHR", "POS", "REF", EA="ALT", "FG EAF"="FINNGEN_af_alt", "FG OR"="FINNGEN_beta", "FG P-value"="FINNGEN_pval",
+                       "UKBB OR"="UKBB_beta", "UKBB P-value"="UKBB_pval",
+                       "All OR"="all_inv_var_meta_beta", "All P-value"="all_inv_var_meta_p")
+  df <- read_tsv(anemia_meta_filename, #n_max=10000, 
+                 col_select = all_of(cols))
+  gc()
+  # Select only the four snips 
+  anemia_meta2 <- anemia_meta %>% 
+    left_join(df, by=c("CHR", "POS", "REF", "EA")) %>%
+    mutate(across(c("FG OR", "UKBB OR", "All OR"), exp)) %>%
+    select(-c("EAF", "OR", "P-value")) %>%
+    add_column(`UK EAF`=c(0.0232, 0.4554, 0.9248, NA), .before="UKBB OR")   # This information was not available for R6. R8 and R9 contain this information. 
+                                                                            # I hand-picked it from there.
+  write_tsv(anemia_meta2, filename)
+} else {
+  anemia_meta2 <- read_tsv(filename)
+}
+# top_snips_all  <- helper(df, "All P-value")
+# gc()
+# top_snips_fg   <- helper(df, "FG P-value")
+# gc()
+# top_snips_ukbb <- helper(df, "UKBB P-value")
+# gc()
+```
+
+
+```{r Read other article tables in}
+filename <- sprintf("%s/table/deferral_genotype_distribution.tsv", result_base)
+deferral_genotype_distribution <- read_tsv(filename)
+filename <- sprintf("%s/table/anemia_genotype_distribution.tsv", result_base)
+anemia_genotype_distribution <- read_tsv(filename)
+filename <- sprintf("%s/table/anemia_genotype_distribution_uk.tsv", result_base)
+anemia_genotype_distribution_uk <- read_tsv(filename)
+
+filename <- paste(result_base, "table", "summary_stat_sizes.tsv", sep="/")
+summary_stat_sizes <- read_tsv(filename, show_col_types = FALSE)
+filename <- paste(result_base, "table", "group_sizes.tsv", sep="/")
+group_sizes <- read_tsv(filename, show_col_types = FALSE)
+
+filename <- paste(result_base, "table", "deferral_tableone.tsv", sep="/")
+deferral_tableone <- read_tsv(filename, show_col_types = FALSE)
+deferral_tableone <- deferral_tableone %>% 
+  select(-p, -test) %>%
+  filter(!level %in% c("case", "control", "male", "female"))  # drop status and sex rows because they contain duplicate information
+filename <- paste(result_base, "table", "anemia_tableone.tsv", sep="/")
+anemia_tableone <- read_tsv(filename, show_col_types = FALSE)   
+anemia_tableone <- anemia_tableone %>% 
+  select(-p, -test) %>%
+  filter(!level %in% c("case", "control", "male", "female"))  # drop status and sex rows because they contain duplicate information
+#anemia_tableone <- tibble(place="holder")
+
+filename <- paste(result_base, "table", "deferral_stats.tsv", sep="/")
+deferral_stats <- read_tsv(filename, show_col_types = FALSE)
+filename <- paste(result_base, "table", "anemia_stats.tsv", sep="/")
+anemia_stats <- read_tsv(filename, show_col_types = FALSE)   
+#anemia_stats <- tibble(place="holder")
+
+filename <- paste(result_base, "table", "deferral_all_genetic_risks.tsv", sep="/")
+deferral_genetic_risks <- read_tsv(filename, show_col_types = FALSE) %>% relocate(mean, .after="group")
+deferral_genetic_risks <- deferral_genetic_risks %>%
+  filter(method != "normal_cox") %>% # As these results are not otherwise shown in the article, don't include them in the table,
+                                     # as it would only be confusing.
+  mutate(method = case_when(method == "bayes" ~ "Logistic regression",
+                            method == "tdc_cox" ~ "Cox PH model")) %>%
+  rename(estimate = mean)
+
+# Odds and hazard ratios of Hb-deferral
+# anemia_bayes_cis.tsv anemia_normal_cox_cis.tsv deferral_bayes_cis.tsv deferral_cox_tdc_cis.tsv
+variables <- c("Group", Variable="Pretty", Mean="Estimate", Low="low", High="high", "Explanation")
+filename <- paste(result_base, "table", "deferral_bayes_cis.tsv", sep="/")
+deferral_logistic <- read_tsv(filename, show_col_types = FALSE) %>% select(all_of(variables))
+filename <- paste(result_base, "table", "deferral_cox_tdc_cis.tsv", sep="/")
+deferral_cox <- read_tsv(filename, show_col_types = FALSE) %>% select(all_of(variables))
+
+# Odds and hazard ratios of IDA
+filename <- paste(result_base, "table", "anemia_bayes_cis.tsv", sep="/")
+anemia_logistic <- read_tsv(filename, show_col_types = FALSE) %>% select(all_of(variables))
+filename <- paste(result_base, "table", "anemia_normal_cox_cis.tsv", sep="/")
+#Group	Variable	Mean	Low	High	Explanation
+anemia_cox <- read_tsv(filename, show_col_types = FALSE) #%>% select(all_of(variables))
+
+# VIF
+filename <- sprintf("%s/deferral_vifs.tsv", table_path)
+deferral_freq_vifs <- read_tsv(filename, show_col_types = FALSE) %>% 
+  mutate(Variable = to_pretty_vector(Variable, descript)) %>% 
+  select(Variable, all, male, female, pre_menopausal_female, post_menopausal_female)
+filename <- sprintf("%s/anemia_vifs.tsv", table_path)
+anemia_freq_vifs <- read_tsv(filename, show_col_types = FALSE) %>% 
+  mutate(Variable = to_pretty_vector(Variable, descript)) %>% 
+  select(Variable, all, male, female, pre_menopausal_female, post_menopausal_female)
+
+#filename <- sprintf("%s/prs_correlations.tsv", table_path)
+#prs_correlations <- read_tsv(filename, show_col_types = FALSE)
+
+# Variable correlations
+filename <- sprintf("%s/deferral_correlations.tsv", table_path)
+deferral_correlations <- read_tsv(filename, show_col_types = FALSE)
+filename <- sprintf("%s/anemia_correlations.tsv", table_path)
+anemia_correlations <- read_tsv(filename, show_col_types = FALSE)
+```
+
+
+```{r}
+# Writes each data frame in list 'dfs' to a separate sheet in an excel work book.
+# The list names will be inserted on row 1 and the data frames is written starting on row 'startRow'.
+my_write_xlsx <- function(dfs, file=filename, asTable=FALSE, overwrite=TRUE, 
+                          creator=NULL, title=NULL, subject=NULL,
+                          number_of_main_text_tables=NULL, ...) {
+  wb <- createWorkbook(creator=creator, title=title, subject=subject)
+  if (is.null(number_of_main_text_tables))
+    number_of_main_text_tables <- length(dfs)   # All tables belong to the main text and no tables in the supplement
+  for (i in 1:length(dfs)) {
+    addWorksheet(wb, if (i <= number_of_main_text_tables) sprintf("Table %i", i) else sprintf("Table S%i", i-number_of_main_text_tables))
+    writeData(wb = wb, sheet = i, names(dfs)[i], xy = c("A", 1))
+    writeDataTable(wb = wb, sheet = i, dfs[[i]], ...)
+  }
+  saveWorkbook(wb, filename, overwrite = overwrite) 
+}
+```
+
+
+```{r}
+filename <- paste(result_base, "table", "all_tables.xlsx", sep="/")
+
+
+supplemental_tables <- tribble(
+  ~table, ~tag, ~description,
+  # Main text
+  group_sizes, "", "FinnGen participant subgroup sizes",
+  anemia_meta2, "", "The four genome-wide significant lead SNPs from the IDA meta-analysis", 
+  summary_stat_sizes, "", "The number of individuals in each GWAS or meta-analysis", 
+  # Supplement
+  description, "#tbl-description", "Description of the variables used in the logistic regression and Cox PH models.", 
+  anemia_tableone, "#tbl-anemia-tableone", "Summary statistics of the IDA dataset",
+  anemia_stats, "#tbl-anemia-stats", "Statistics of IDA phenotype",
+  deferral_tableone, "#tbl-deferral-tableone", "Summary statistics of the Hb-deferral dataset", 
+  deferral_stats, "#tbl-deferral-stats", "Statistics of Hb-deferral phenotype",
+  deferral_freq_vifs, "#tbl-deferral-freq-vifs", "Variance inflation factors for the logistic Hb-deferral model.", 
+  anemia_freq_vifs, "#tbl-anemia-freq-vifs", "Variance inflation factors for the logistic IDA model.", 
+  deferral_correlations, "#tbl-deferral-correlations", "Pearson's correlations between predictive variables in the logistic Hb-deferral model.", 
+  anemia_correlations, "#tbl-anemia-correlations", "Pearson's correlations between predictive variables in the logistic IDA model.", 
+  deferral_genotype_distribution, "#tbl-deferral-genotype-distribution", "Genotype distributions of the four SNPs in FinnGen blood donors stratified by the Hb-deferral status.", 
+  anemia_genotype_distribution, "#tbl-anemia-genotype-distribution", "Genotype distributions of the four SNPs in FinnGen stratified by the IDA status.", 
+  anemia_genotype_distribution_uk, "#tbl-anemia-genotype-distribution-interval", "Genotype distributions of the four SNPs in INTERVAL stratified by the IDA status.", 
+  deferral_logistic, "#tbl-deferral-logistic", "Odds ratios of the multivariable logistic model of Hb-deferral.", 
+  deferral_cox, "#tbl-deferral-cox", "Hazard ratios of the multivariable Cox PH model of Hb-deferral.", 
+  anemia_logistic, "#tbl-anemia-logistic", "Odds ratios of the multivariable logistic model of IDA.", 
+  anemia_cox, "#tbl-anemia-cox", "Hazard ratios of the multivariable Cox PH model of IDA.", 
+  deferral_genetic_risks, "#tbl-deferral-genetic-risks", "Lower limits of odds ratios between the first and last deciles of the total genetic score of Hb-deferral and their 95% confidence intervals. Estimates are done with several models and demographic groups. The Cox method includes some time-dependent covariates.", 
+)
+
+
+# Add table numbers as prefixes of the sheet names
+#table_numbers <- c(sprintf("Table %i - ", 1:3), sprintf("Table S%i - ", 1:10)) # These are too long! The max length for sheet name is 31 characters.
+#table_numbers <- c(sprintf("Table %i. ", 1:3), sprintf("Table S%i. ", 1:10))
+#table_numbers <- c(sprintf("%i. ", 1:3), sprintf("S%i. ", 1:10))
+#names(dfs) <- str_c(table_numbers, names(dfs))
+# Style for header line
+hs <- createStyle(
+  textDecoration = "BOLD", fontColour = "#FFFFFF", 
+  #fontSize = 12, fontName = "Arial Narrow", 
+  fgFill = "#4F80BD"
+)
+# wb <- openxlsx::write.xlsx(dfs, file = filename, 
+#                            startRow = 2, headerStyle=hs,
+#                            creator="Jarkko Toivonen")
+dfs <- supplemental_tables %>% select(description, table) %>% deframe()
+number_of_main_text_tables <- 3
+wb <- my_write_xlsx(dfs, file = filename, 
+                    startRow = 2, headerStyle=hs,
+                    creator="Jarkko Toivonen",
+                    title="The value of genetic data from 665,460 individuals in managing iron deficiency anemia and suitability to donate blood",
+                    subject="Supplemental tables",
+                    number_of_main_text_tables=number_of_main_text_tables)
+
+```
+
+
+```{r Write table captions to file}
+filename <- file.path(result_base, "table_captions.txt")
+if (file.exists(filename)) file.remove(filename)
+print_table_captions <- function(df) {
+  helper <- function(tag, description, ...) {
+    s <- glue::glue(
+"|     |
+|-----|
+|     |
+
+: {description} {{{tag}}}
+\n\n"
+    )  
+    print(s)
+    cat(s, file=filename, append=TRUE)
+  }
+  df %>% pwalk(helper)
+}
+print_table_captions(supplemental_tables[(number_of_main_text_tables+1):nrow(supplemental_tables),])
+```
 
 
 

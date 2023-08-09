@@ -12,6 +12,8 @@ suppressPackageStartupMessages(library(qqman))
 # - manhattan plot
 # - Q-Q plot
 
+#ubuntu@blooddonorresearch02:/media/blooddonorresearch02data/R8/results$ zcat regenieio/output/step2_hb_median_hb_median.regenie.gz | head -1
+#CHROM GENPOS ID ALLELE0 ALLELE1 A1FREQ N TEST BETA SE CHISQ LOG10P EXTRA
 
 # results_hb_median.all.summary_statistics.txt
 
@@ -26,12 +28,18 @@ phenotype <- args[2]
 #results <- fread(gwas_result_filename, data.table=F)
 results <- read_delim(gwas_result_filename, delim = " ", col_types = cols()) # Last parameter to get rid of printing of guessed col types
 
-ymax <- ceiling(-log10(min(results$p.value))+1)
+results <- results %>%
+	mutate(P=10**-LOG10P) # LOG10P is actually -LOG10P
+
+#ymax <- ceiling(-log10(min(results$p.value))+1) # Saige
+ymax <- ceiling(max(results$LOG10P)+1) # Regenie
+
+cat(sprintf("ymax = %f\n", ymax))
 
 output_dir <- "../results/images"
 # Manhattan plot
-png(sprintf("%s/manhattan_plot_%s.png", output_dir, phenotype), height= 15, width= 35, units="cm", res=400)
-manhattan(results, chr="CHR", bp="POS", p="p.value", snp="SNPID", ylim= c(0,ymax), col=c("blue", "brown"), cex = 0.6, cex.axis=0.8, las=2)
+png(sprintf("%s/regenie_manhattan_plot_%s.png", output_dir, phenotype), height= 15, width= 35, units="cm", res=400)
+manhattan(results, chr="CHROM", bp="GENPOS", p="P", snp="ID", ylim= c(0,ymax), col=c("blue", "brown"), cex = 0.6, cex.axis=0.8, las=2)
 title(phenotype)
 dev.off()
 
@@ -47,10 +55,10 @@ compute_gif <- function (pvalue) {
 
 
 # Q-Q plot
-png(sprintf("%s/qq_plot_%s.png", output_dir, phenotype), height= 15, width= 20, units="cm", res=300)
+png(sprintf("%s/regenie_qq_plot_%s.png", output_dir, phenotype), height= 15, width= 20, units="cm", res=300)
 # Compute genomic inflation factor
-lambda <- compute_gif(results$p.value)
+lambda <- compute_gif(results$P)
 lambda2 <- signif(lambda, 3)
-qq(results$p.value, sub=bquote(~lambda == .(lambda2)))
+qq(results$P, sub=bquote(~lambda == .(lambda2)))
 title(phenotype)
 dev.off()
