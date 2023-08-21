@@ -1576,15 +1576,15 @@ filename <- paste(result_base, "table", "all_tables.xlsx", sep="/")
 supplemental_tables <- tribble(
   ~table, ~tag, ~description,
   # Main text
-  group_sizes, "", "FinnGen participant subgroup sizes",
-  anemia_meta2, "", "The four genome-wide significant lead SNPs from the IDA meta-analysis", 
-  summary_stat_sizes, "", "The number of individuals in each GWAS or meta-analysis", 
+  group_sizes, "", "FinnGen participant subgroup sizes.",
+  anemia_meta2, "", "The four genome-wide significant lead SNPs from the IDA meta-analysis.", 
+  summary_stat_sizes, "", "The number of individuals in each GWAS or meta-analysis.", 
   # Supplement
   description, "#tbl-description", "Description of the variables used in the logistic regression and Cox PH models.", 
-  anemia_tableone, "#tbl-anemia-tableone", "Summary statistics of the IDA dataset",
-  anemia_stats, "#tbl-anemia-stats", "Statistics of IDA phenotype",
-  deferral_tableone, "#tbl-deferral-tableone", "Summary statistics of the Hb-deferral dataset", 
-  deferral_stats, "#tbl-deferral-stats", "Statistics of Hb-deferral phenotype",
+  anemia_tableone, "#tbl-anemia-tableone", "Summary statistics of the IDA dataset.",
+  anemia_stats, "#tbl-anemia-stats", "Statistics of IDA phenotype.",
+  deferral_tableone, "#tbl-deferral-tableone", "Summary statistics of the Hb-deferral dataset.", 
+  deferral_stats, "#tbl-deferral-stats", "Statistics of Hb-deferral phenotype.",
   deferral_freq_vifs, "#tbl-deferral-freq-vifs", "Variance inflation factors for the logistic Hb-deferral model.", 
   anemia_freq_vifs, "#tbl-anemia-freq-vifs", "Variance inflation factors for the logistic IDA model.", 
   deferral_correlations, "#tbl-deferral-correlations", "Pearson's correlations between predictive variables in the logistic Hb-deferral model.", 
